@@ -58,7 +58,8 @@ function validTrainerId(value) {
 }
 
 function field(name, value) {
-  return { name, value: value || 'Not available', inline: true };
+  const text = String(value ?? '').trim() || 'Not available';
+  return { name: String(name).slice(0, 256), value: text.slice(0, 1024), inline: true };
 }
 
 function resultItems(results) {
@@ -90,7 +91,7 @@ function buildSearchMessage(search, items, page) {
     .setTitle('🔎 Umamusume DB Spark / Legacy Search')
     .setDescription(lines.length ? lines.join('\n') : 'No indexed trainers matched the filters, or Pure DB returned no readable result rows.')
     .addFields(
-      { name: 'Filters applied', value: search.applied.length ? search.applied.join('\n') : 'None detected' },
+      { name: 'Filters applied', value: String(search.applied?.join('\n') || 'None detected').slice(0, 1024) },
       { name: 'Results', value: `${items.length ? start + 1 : 0}-${Math.min(start + PAGE_SIZE, items.length)} of ${items.length}` },
       { name: 'Source', value: `[Open Umamusume DB](${search.url || SEARCH_URL})` }
     )
@@ -176,7 +177,7 @@ client.on('interactionCreate', async interaction => {
       const profile = await withTimeout(getPureDbProfile(trainerId), 'Trainer profile lookup');
       if (!profile) return interaction.editReply(`❌ I couldn't find **${trainerId}** in the indexed Global databases.`);
       const embed = new EmbedBuilder()
-        .setTitle(`🐎 ${profile.name || 'Trainer Profile'}`)
+        .setTitle(`🐎 ${String(profile.name || 'Trainer Profile').slice(0, 240)}`)
         .setDescription(`**Trainer ID:** ${trainerId}`)
         .addFields(
           field('Trainer Rank', profile.rank), field('Fans', profile.fans),
