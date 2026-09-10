@@ -23,6 +23,7 @@ const {
   ButtonStyle
 } = require('discord.js');
 
+const { getUmaMoeProfile } = require('./src/umaMoe');
 const { getPureDbProfile, getPureDbSearch, SEARCH_URL } = require('./src/pureDb');
 
 process.on('unhandledRejection', error => console.error('Unhandled promise rejection:', error));
@@ -174,19 +175,36 @@ client.on('interactionCreate', async interaction => {
     }
 
     try {
-      const profile = await withTimeout(getPureDbProfile(trainerId), 'Trainer profile lookup');
+      // Primary source: uma.moe's V3 unified search API. It supports direct
+      // trainer_id filtering and is much faster/reliable than automating Pure DB.
+      let profile = null;
+      try {
+        console.log(`Trying uma.moe Trainer ID lookup: ${trainerId}`);
+        profile = await getUmaMoeProfile(trainerId);
+      } catch (error) {
+        console.warn(`uma.moe lookup failed for ${trainerId}: ${error.message}`);
+      }
+
+      // Secondary source: Pure DB, kept as a fallback for accounts that are
+      // present there but not in uma.moe.
+      if (!profile) {
+        console.log(`Trying Pure DB fallback for Trainer ID: ${trainerId}`);
+        profile = await getPureDbProfile(trainerId);
+      }
+
       if (!profile) return interaction.editReply(`❌ I couldn't find **${trainerId}** in the indexed Global databases.`);
+
       const embed = new EmbedBuilder()
         .setTitle(`🐎 ${String(profile.name || 'Trainer Profile').slice(0, 240)}`)
         .setDescription(`**Trainer ID:** ${trainerId}`)
         .addFields(
-          field('Trainer Rank', profile.rank), field('Fans', profile.fans),
+          field('Trainer Rank', profile.rank), field('Fans / Followers', profile.fans),
           field('Representative Uma', profile.representativeUma), field('Support Card', profile.supportCard),
           field('Blue Sparks', profile.blueSparks), field('Red Sparks', profile.redSparks),
           field('Green Sparks', profile.greenSparks), field('White Sparks', profile.whiteSparks),
           field('Inheritance', profile.inheritance)
         )
-        .setFooter({ text: 'Fanservice • Global indexed data' });
+        .setFooter({ text: `Fanservice • ${profile.source || 'Global indexed data'}` });
       if (profile.url) embed.setURL(profile.url);
       if (profile.image) embed.setThumbnail(profile.image);
       return interaction.editReply({ embeds: [embed] });
