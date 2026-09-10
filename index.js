@@ -19,8 +19,12 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 const searchPages = new Map();
 const PAGE_SIZE = 5;
 const PAGE_TTL = 10 * 60 * 1000;
+const LOOKUP_TIMEOUT = 45 * 1000;
 
 const commands = [
+  new SlashCommandBuilder()
+    .setName('ping')
+    .setDescription('Check whether Fanservice is responding.'),
   new SlashCommandBuilder()
     .setName('uma-profile')
     .setDescription('Look up a Global Uma Musume trainer by Trainer ID.')
@@ -94,6 +98,20 @@ function cleanupSearchPages() {
   }
 }
 
+async function withTimeout(promise, label) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${LOOKUP_TIMEOUT / 1000}s.`)), LOOKUP_TIMEOUT);
+      })
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 client.once('clientReady', async () => {
   try {
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
@@ -126,6 +144,10 @@ client.on('interactionCreate', async interaction => {
 
   if (!interaction.isChatInputCommand()) return;
 
+  if (interaction.commandName === 'ping') {
+    return interaction.reply({ content: '🏓 Pong! Fanservice is online.' });
+  }
+
   if (interaction.commandName === 'uma-profile') {
     const trainerId = interaction.options.getString('trainer_id', true).trim();
     if (!validTrainerId(trainerId)) return interaction.reply({ content: '❌ Please enter the 9–12 digit numeric Global Trainer ID.', ephemeral: true });
@@ -138,7 +160,7 @@ client.on('interactionCreate', async interaction => {
     }
 
     try {
-      const profile = await getPureDbProfile(trainerId);
+      const profile = await withTimeout(getPureDbProfile(trainerId), 'Trainer profile lookup');
       if (!profile) return interaction.editReply(`❌ I couldn't find **${trainerId}** in the indexed Global databases.`);
       const embed = new EmbedBuilder()
         .setTitle(`🐎 ${profile.name || 'Trainer Profile'}`)
@@ -156,7 +178,7 @@ client.on('interactionCreate', async interaction => {
       return interaction.editReply({ embeds: [embed] });
     } catch (error) {
       console.error('uma-profile error:', error);
-      return interaction.editReply('⚠️ The profile lookup failed.');
+      return interaction.editReply(`⚠️ Profile lookup failed: ${String(error.message || error).slice(0, 1500)}`);
     }
   }
 
@@ -181,7 +203,7 @@ client.on('interactionCreate', async interaction => {
 
     try {
       console.log('Starting Pure DB search:', JSON.stringify(filters));
-      const search = await getPureDbSearch(filters);
+      const search = await withTimeout(getPureDbSearch(filters), 'Pure DB search');
       const items = resultItems(search.results);
       const message = buildSearchMessage(search, items, 0);
       const sent = await interaction.editReply({ embeds: message.embeds, components: message.components });
