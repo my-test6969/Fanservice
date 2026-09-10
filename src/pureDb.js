@@ -98,10 +98,99 @@ function parseProfile(html, trainerId, url) {
 async function getProfileWithBrowser(trainerId) {
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ userAgent: 'Mozilla/5.0 Fanservice/1.0' });
+
   try {
     await page.goto(SEARCH_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForTimeout(1500);
 
+    // Pure DB does not guarantee a public /user/global/<id> route. Its own
+    // search page can register/refresh a trainer ID and then expose the real
+    // profile link (including suffixes such as /403). Use that UI first.
+    const controls = page.locator('input, textarea');
+    const controlCount = await controls.count();
+
+    for (let i = 0; i < controlCount; i++) {
+      const el = controls.nth(i);
+      const meta = await el.evaluate(node => ({
+        type: node.getAttribute('type') || '',
+        name: node.getAttribute('name') || '',
+        id: node.id || '',
+        placeholder: node.getAttribute('placeholder') || '',
+        aria: node.getAttribute('aria-label') || '',
+        title: node.getAttribute('title') || ''
+      })).catch(() => null);
+      if (!meta) continue;
+
+      const haystack = clean([
+        meta.name, meta.id, meta.placeholder, meta.aria, meta.title
+      ].join(' ')).toLowerCase();
+
+      // Do not fill unrelated search filters. Look specifically for a trainer
+      // ID / user ID control, while allowing generic fields whose surrounding
+      // label mentions registration/refresh.
+      if (!/(trainer|user).*(id|number)|id.*(trainer|user)|register.*id|refresh.*id/i.test(haystack)) continue;
+      if (!['text', 'search', 'number', ''].includes(meta.type)) continue;
+
+      try {
+        await el.fill(trainerId);
+
+        const nearbyButtons = page.locator('button, input[type="submit"]');
+        const buttonCount = await nearbyButtons.count();
+        let clicked = false;
+
+        for (let b = 0; b < buttonCount; b++) {
+          const button = nearbyButtons.nth(b);
+          const text = clean(await button.innerText().catch(() => ''));
+          const aria = clean(await button.getAttribute('aria-label').catch(() => ''));
+          const title = clean(await button.getAttribute('title').catch(() => ''));
+          const label = `${text} ${aria} ${title}`.toLowerCase();
+
+          if (!/(register|refresh|search|lookup|find)/i.test(label)) continue;
+
+          try {
+            await button.click({ timeout: 5000, force: true });
+            clicked = true;
+            break;
+          } catch (_) {
+            try {
+              await button.evaluate(node => node.click());
+              clicked = true;
+              break;
+            } catch (_) {}
+          }
+        }
+
+        if (!clicked) {
+          await el.press('Enter').catch(() => {});
+        }
+
+        await page.waitForTimeout(2500);
+
+        // The operation may navigate directly to the profile.
+        const currentUrl = page.url();
+        const currentHtml = await page.content();
+        const direct = parseProfile(currentHtml, trainerId, currentUrl);
+        if (direct) return direct;
+
+        // Otherwise locate the generated profile link from the updated DOM.
+        const links = await page.locator('a').evaluateAll((anchors, id) => anchors.map(a => ({
+          text: (a.innerText || a.textContent || '').trim(),
+          href: a.href || ''
+        })).filter(x => x.href.includes(id)), trainerId);
+
+        for (const link of links) {
+          try {
+            const html = await fetchPage(link.href);
+            if (!html) continue;
+            const parsed = parseProfile(html, trainerId, link.href);
+            if (parsed) return parsed;
+          } catch (_) {}
+        }
+      } catch (_) {}
+    }
+
+    // Last browser fallback: some search results are already rendered as
+    // links after page load. This catches indexed IDs without registration.
     const links = await page.locator('a').evaluateAll((anchors, id) => anchors.map(a => ({
       text: (a.innerText || a.textContent || '').trim(),
       href: a.href || ''
@@ -118,6 +207,7 @@ async function getProfileWithBrowser(trainerId) {
   } finally {
     await browser.close();
   }
+
   return null;
 }
 
