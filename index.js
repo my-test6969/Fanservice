@@ -1,5 +1,15 @@
-require('dotenv').config();
 const http = require('http');
+
+// Bind Render's web port immediately so the platform can detect the service
+// before Discord/Playwright finish loading.
+const port = Number(process.env.PORT) || 10000;
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+  res.end('Fanservice is online.');
+});
+server.listen(port, '0.0.0.0', () => console.log(`Health server listening on port ${port}`));
+
+require('dotenv').config();
 
 const {
   Client,
@@ -14,6 +24,9 @@ const {
 } = require('discord.js');
 
 const { getPureDbProfile, getPureDbSearch, SEARCH_URL } = require('./src/pureDb');
+
+process.on('unhandledRejection', error => console.error('Unhandled promise rejection:', error));
+process.on('uncaughtException', error => console.error('Uncaught exception:', error));
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 const searchPages = new Map();
@@ -219,13 +232,5 @@ client.on('interactionCreate', async interaction => {
 
 client.on('error', error => console.error('Discord client error:', error));
 client.on('warn', message => console.warn('Discord warning:', message));
-
-const port = Number(process.env.PORT) || 10000;
-const server = http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-  res.end('Fanservice is online.');
-});
-
-server.listen(port, '0.0.0.0', () => console.log(`Health server listening on port ${port}`));
 
 client.login(process.env.DISCORD_TOKEN).catch(error => console.error('Discord login failed:', error));
