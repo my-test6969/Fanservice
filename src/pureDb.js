@@ -1,333 +1,199 @@
 const cheerio = require('cheerio');
 
-// Render's build step bundles Playwright browsers inside node_modules when
-// PLAYWRIGHT_BROWSERS_PATH=0 is used. Set the same value at runtime before
-// loading Playwright so it does not fall back to /opt/render/.cache.
 process.env.PLAYWRIGHT_BROWSERS_PATH = '0';
-
 const { chromium } = require('playwright');
 
 const SEARCH_URL = 'https://uma.pure-db.com/en-us/search';
+const REGISTER_URL = 'https://uma.pure-db.com/en-us/register';
 const BASE = 'https://uma.pure-db.com/en-us/user/global';
 
 function clean(text) {
   return String(text || '').replace(/\s+/g, ' ').trim();
 }
 
-function visibleLines(html) {
+function linesFrom(html) {
   const $ = cheerio.load(html);
   $('script, style, noscript, template').remove();
   return $('body').text().split('\n').map(clean).filter(Boolean);
 }
 
 function isNotFound(lines) {
-  return lines.some(line => /^user not found$/i.test(line)) ||
-    lines.some(line => /user not found/i.test(line) && line.length < 80);
+  return lines.some(x => /^user not found$/i.test(x));
 }
 
-function findAfter(lines, labels) {
+function after(lines, labels) {
   for (const label of labels) {
-    const i = lines.findIndex(line => line.toLowerCase() === label.toLowerCase());
+    const i = lines.findIndex(x => x.toLowerCase() === label.toLowerCase());
     if (i >= 0 && lines[i + 1]) return lines[i + 1];
   }
   return '';
 }
 
-function findSection(lines, labels, stopLabels = []) {
-  const start = lines.findIndex(line => labels.some(label => line.toLowerCase() === label.toLowerCase()));
+function section(lines, labels, stops) {
+  const start = lines.findIndex(x => labels.some(l => x.toLowerCase() === l.toLowerCase()));
   if (start < 0) return '';
   const out = [];
-  for (let i = start + 1; i < Math.min(lines.length, start + 35); i++) {
-    if (stopLabels.some(label => lines[i].toLowerCase() === label.toLowerCase())) break;
-    if (lines[i]) out.push(lines[i]);
+  for (let i = start + 1; i < Math.min(lines.length, start + 40); i++) {
+    if (stops.some(s => lines[i].toLowerCase() === s.toLowerCase())) break;
+    out.push(lines[i]);
   }
-  return out.slice(0, 12).join(' • ');
+  return out.slice(0, 16).join(' • ');
 }
 
 async function fetchPage(url) {
-  const response = await fetch(url, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 Fanservice/1.0 (+Discord Uma Musume trainer lookup)',
-      Accept: 'text/html,application/xhtml+xml'
-    },
+  const r = await fetch(url, {
+    headers: { 'User-Agent': 'Mozilla/5.0 Fanservice/1.0', Accept: 'text/html,application/xhtml+xml' },
     signal: AbortSignal.timeout(15000)
   });
-  if (!response.ok) return null;
-  return response.text();
+  return r.ok ? r.text() : null;
 }
 
 function parseProfile(html, trainerId, url) {
   const $ = cheerio.load(html);
   $('script, style, noscript, template').remove();
   const lines = $('body').text().split('\n').map(clean).filter(Boolean);
-
-  // Pure DB's not-found page contains JavaScript which can include the searched
-  // trainer ID. Never treat that script text as profile data.
   if (isNotFound(lines)) return null;
-  if (!lines.some(line => line === trainerId || line.includes(trainerId))) return null;
+  if (!lines.some(x => x === trainerId)) return null;
 
+  const i = lines.findIndex(x => x === trainerId);
   const profile = {
-    name: '', rank: '', fans: '', representativeUma: '', supportCard: '',
+    name: i > 0 ? lines[i - 1] : '',
+    rank: after(lines, ['Trainer Rank', 'Rank']),
+    fans: after(lines, ['Fans', 'Total Fans', 'Fan Count']),
+    representativeUma: after(lines, ['Representative Horse Girl', 'Representative Uma', 'Representative']),
+    supportCard: after(lines, ['Support Card', 'Representative Support Card']),
     blueSparks: '', redSparks: '', greenSparks: '', whiteSparks: '',
-    inheritance: '', image: '', url
+    inheritance: section(lines, ['Inheritance1', 'Inheritance 1'], ['Inheritance2', 'Inheritance 2', 'Skills']),
+    image: $('img').toArray().map(x => $(x).attr('src')).find(x => x && /^https?:/.test(x)) || '',
+    url
   };
 
-  const idIndex = lines.findIndex(line => line === trainerId || line.includes(trainerId));
-  if (idIndex > 0) {
-    const possibleName = lines[idIndex - 1];
-    if (possibleName && possibleName !== trainerId) profile.name = possibleName;
-  }
-
-  profile.rank = findAfter(lines, ['Trainer Rank', 'Rank', 'Trainer rank']);
-  profile.fans = findAfter(lines, ['Fans', 'Total Fans', 'Fan Count']);
-  profile.representativeUma = findAfter(lines, ['Representative Horse Girl', 'Representative Uma', 'Representative']);
-  profile.supportCard = findAfter(lines, ['Support Card', 'Representative Support Card']);
-  profile.inheritance = findSection(lines, ['Inheritance1', 'Inheritance 1'], ['Inheritance2', 'Inheritance 2', 'Skills']);
-
-  const sparkWords = lines.filter(line => /speed|stamina|power|guts|wit|sprint|mile|medium|long|turf|dirt|ura|factor|spark/i.test(line));
-  profile.blueSparks = sparkWords.slice(0, 8).join(' • ') || 'Not available';
-  profile.redSparks = sparkWords.slice(8, 14).join(' • ') || 'Not available';
-  profile.greenSparks = sparkWords.slice(14, 20).join(' • ') || 'Not available';
-  profile.whiteSparks = sparkWords.slice(20, 28).join(' • ') || 'Not available';
-
-  const image = $('img').toArray().map(el => $(el).attr('src')).find(src => src && /^https?:/.test(src));
-  profile.image = image || '';
+  // Pure DB renders the actual factor rows as text. Keep the parser conservative
+  // instead of mixing unrelated skills into the spark fields.
+  const factorLines = lines.filter(x => /★\d+/.test(x));
+  profile.blueSparks = factorLines.filter(x => /speed|stamina|power|guts|wit/i.test(x)).slice(0, 12).join(' • ') || 'Not available';
+  profile.redSparks = factorLines.filter(x => /sprint|mile|medium|long|turf|dirt|aptitude/i.test(x)).slice(0, 12).join(' • ') || 'Not available';
+  profile.greenSparks = factorLines.filter(x => !/speed|stamina|power|guts|wit|sprint|mile|medium|long|turf|dirt|aptitude/i.test(x)).slice(0, 12).join(' • ') || 'Not available';
+  profile.whiteSparks = factorLines.slice(0, 20).join(' • ') || 'Not available';
   return profile;
+}
+
+async function extractProfileFromPage(page, trainerId) {
+  const html = await page.content();
+  const parsed = parseProfile(html, trainerId, page.url());
+  if (parsed) return parsed;
+
+  const links = await page.locator('a').evaluateAll((anchors, id) => anchors.map(a => ({
+    text: (a.innerText || a.textContent || '').trim(),
+    href: a.href || ''
+  })).filter(x => x.href.includes(id)), trainerId);
+
+  for (const link of links) {
+    try {
+      const html = await fetchPage(link.href);
+      const p = html && parseProfile(html, trainerId, link.href);
+      if (p) return p;
+    } catch (_) {}
+  }
+  return null;
 }
 
 async function getProfileWithBrowser(trainerId) {
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ userAgent: 'Mozilla/5.0 Fanservice/1.0' });
-
   try {
-    await page.goto(SEARCH_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForTimeout(1500);
+    // The real Pure DB page explicitly exposes this as Register/Refresh Trainer ID.
+    // Do not guess field IDs: this is a React/Base UI page with generated IDs.
+    await page.goto(REGISTER_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(1200);
 
-    // Pure DB does not guarantee a public /user/global/<id> route. Its own
-    // search page can register/refresh a trainer ID and then expose the real
-    // profile link (including suffixes such as /403). Use that UI first.
-    const controls = page.locator('input, textarea');
-    const controlCount = await controls.count();
-
-    for (let i = 0; i < controlCount; i++) {
-      const el = controls.nth(i);
-      const meta = await el.evaluate(node => ({
-        type: node.getAttribute('type') || '',
-        name: node.getAttribute('name') || '',
-        id: node.id || '',
+    const inputs = page.locator('input');
+    const candidates = [];
+    for (let i = 0; i < await inputs.count(); i++) {
+      const el = inputs.nth(i);
+      const info = await el.evaluate(node => ({
+        type: node.type || '',
+        value: node.value || '',
         placeholder: node.getAttribute('placeholder') || '',
         aria: node.getAttribute('aria-label') || '',
-        title: node.getAttribute('title') || ''
+        name: node.getAttribute('name') || '',
+        visible: !!(node.offsetWidth || node.offsetHeight || node.getClientRects().length)
       })).catch(() => null);
-      if (!meta) continue;
-
-      const haystack = clean([
-        meta.name, meta.id, meta.placeholder, meta.aria, meta.title
-      ].join(' ')).toLowerCase();
-
-      // Do not fill unrelated search filters. Look specifically for a trainer
-      // ID / user ID control, while allowing generic fields whose surrounding
-      // label mentions registration/refresh.
-      if (!/(trainer|user).*(id|number)|id.*(trainer|user)|register.*id|refresh.*id/i.test(haystack)) continue;
-      if (!['text', 'search', 'number', ''].includes(meta.type)) continue;
-
-      try {
-        await el.fill(trainerId);
-
-        const nearbyButtons = page.locator('button, input[type="submit"]');
-        const buttonCount = await nearbyButtons.count();
-        let clicked = false;
-
-        for (let b = 0; b < buttonCount; b++) {
-          const button = nearbyButtons.nth(b);
-          const text = clean(await button.innerText().catch(() => ''));
-          const aria = clean(await button.getAttribute('aria-label').catch(() => ''));
-          const title = clean(await button.getAttribute('title').catch(() => ''));
-          const label = `${text} ${aria} ${title}`.toLowerCase();
-
-          if (!/(register|refresh|search|lookup|find)/i.test(label)) continue;
-
-          try {
-            await button.click({ timeout: 5000, force: true });
-            clicked = true;
-            break;
-          } catch (_) {
-            try {
-              await button.evaluate(node => node.click());
-              clicked = true;
-              break;
-            } catch (_) {}
-          }
-        }
-
-        if (!clicked) {
-          await el.press('Enter').catch(() => {});
-        }
-
-        await page.waitForTimeout(2500);
-
-        // The operation may navigate directly to the profile.
-        const currentUrl = page.url();
-        const currentHtml = await page.content();
-        const direct = parseProfile(currentHtml, trainerId, currentUrl);
-        if (direct) return direct;
-
-        // Otherwise locate the generated profile link from the updated DOM.
-        const links = await page.locator('a').evaluateAll((anchors, id) => anchors.map(a => ({
-          text: (a.innerText || a.textContent || '').trim(),
-          href: a.href || ''
-        })).filter(x => x.href.includes(id)), trainerId);
-
-        for (const link of links) {
-          try {
-            const html = await fetchPage(link.href);
-            if (!html) continue;
-            const parsed = parseProfile(html, trainerId, link.href);
-            if (parsed) return parsed;
-          } catch (_) {}
-        }
-      } catch (_) {}
+      if (info && info.visible && !['hidden','submit','button'].includes(info.type)) candidates.push({ el, info });
     }
 
-    // Last browser fallback: some search results are already rendered as
-    // links after page load. This catches indexed IDs without registration.
-    const links = await page.locator('a').evaluateAll((anchors, id) => anchors.map(a => ({
-      text: (a.innerText || a.textContent || '').trim(),
-      href: a.href || ''
-    })).filter(x => x.href.includes(id)), trainerId);
+    // On /register the first control is the Game Server selector and the
+    // Trainer ID is the following text/search input. Prefer a field whose
+    // metadata says trainer/id; otherwise use the last visible text input.
+    let trainerInput = candidates.find(x => /trainer|user.*id|id.*trainer/i.test(`${x.info.placeholder} ${x.info.aria} ${x.info.name}`));
+    if (!trainerInput) trainerInput = [...candidates].reverse().find(x => /text|search|number/.test(x.info.type) || !x.info.type);
+    if (!trainerInput) throw new Error('Pure DB Trainer ID input was not found');
 
-    for (const link of links) {
-      try {
-        const html = await fetchPage(link.href);
-        if (!html) continue;
-        const parsed = parseProfile(html, trainerId, link.href);
-        if (parsed) return parsed;
-      } catch (_) {}
-    }
+    await trainerInput.el.fill(trainerId);
+
+    const button = page.getByRole('button', { name: /Register\/Refresh Trainer ID/i });
+    if (!(await button.count())) throw new Error('Pure DB Register/Refresh button was not found');
+    await button.first().click({ timeout: 10000 });
+
+    // Registration can navigate to the generated /user/global/<id>/<suffix>
+    // profile, or update the current DOM with a profile link.
+    await page.waitForTimeout(3500);
+    let profile = await extractProfileFromPage(page, trainerId);
+    if (profile) return profile;
+
+    // If registration leaves us on another page, search the main page again.
+    await page.goto(SEARCH_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(1200);
+    profile = await extractProfileFromPage(page, trainerId);
+    if (profile) return profile;
   } finally {
     await browser.close();
   }
-
   return null;
 }
 
 async function getPureDbProfile(trainerId) {
-  // Do not guess arbitrary Pure DB suffixes. A suffix such as /403 is not a
-  // documented universal route and guessing it can produce a false not-found.
-  const candidates = [
-    `${BASE}/${trainerId}`
-  ];
-
-  for (const url of candidates) {
-    try {
-      const html = await fetchPage(url);
-      if (!html) continue;
-      const parsed = parseProfile(html, trainerId, url);
+  // Fast path for known profile URLs.
+  try {
+    const html = await fetchPage(`${BASE}/${trainerId}`);
+    if (html) {
+      const parsed = parseProfile(html, trainerId, `${BASE}/${trainerId}`);
       if (parsed) return parsed;
-    } catch (error) {
-      console.warn(`Pure DB request failed for ${url}: ${error.message}`);
     }
+  } catch (e) {
+    console.warn(`Pure DB direct lookup failed: ${e.message}`);
   }
 
+  // Correct fallback: use Pure DB's actual Register/Refresh Trainer ID page.
   return getProfileWithBrowser(trainerId);
 }
 
-function filterText(value) {
-  return clean(value).toLowerCase();
-}
+function filterText(value) { return clean(value).toLowerCase(); }
 
 async function setControl(page, keywords, value) {
   if (value === null || value === undefined || value === '') return false;
-  const wanted = filterText(value);
   const controls = page.locator('input, textarea, select');
-  const count = await controls.count();
-
-  for (let i = 0; i < count; i++) {
+  for (let i = 0; i < await controls.count(); i++) {
     const el = controls.nth(i);
     const meta = await el.evaluate(node => ({
-      tag: node.tagName,
-      type: node.getAttribute('type') || '',
-      name: node.getAttribute('name') || '',
-      id: node.id || '',
-      placeholder: node.getAttribute('placeholder') || '',
-      aria: node.getAttribute('aria-label') || '',
-      title: node.getAttribute('title') || ''
+      tag: node.tagName, type: node.type || '', name: node.name || '', id: node.id || '',
+      placeholder: node.getAttribute('placeholder') || '', aria: node.getAttribute('aria-label') || ''
     })).catch(() => null);
     if (!meta) continue;
-
-    const haystack = filterText([meta.name, meta.id, meta.placeholder, meta.aria, meta.title].join(' '));
-    if (!keywords.some(k => haystack.includes(filterText(k)))) continue;
-
+    const hay = filterText([meta.name, meta.id, meta.placeholder, meta.aria].join(' '));
+    if (!keywords.some(k => hay.includes(filterText(k)))) continue;
     try {
-      if (meta.tag === 'SELECT') {
-        const options = await el.locator('option').allTextContents();
-        const match = options.find(x => filterText(x).includes(wanted));
-        if (match) {
-          await el.selectOption({ label: match });
-          return true;
-        }
-      } else if (meta.tag === 'INPUT' && ['text', 'search', 'number', ''].includes(meta.type)) {
-        await el.fill(String(value));
-        return true;
-      }
+      if (meta.tag === 'SELECT') await el.selectOption({ label: String(value) });
+      else await el.fill(String(value));
+      return true;
     } catch (_) {}
   }
   return false;
 }
 
 async function clickPureDbSearch(page) {
-  const exact = page.getByText('Search', { exact: true });
-  const exactCount = await exact.count();
-  if (exactCount) {
-    for (let i = exactCount - 1; i >= 0; i--) {
-      const el = exact.nth(i);
-      if (await el.isVisible().catch(() => false)) {
-        try {
-          await el.click({ timeout: 5000, force: true });
-          return true;
-        } catch (_) {
-          try {
-            await el.evaluate(node => node.click());
-            return true;
-          } catch (_) {}
-        }
-      }
-    }
-  }
-
-  const buttons = page.locator('button, input[type="submit"]');
-  const count = await buttons.count();
-  for (let i = 0; i < count; i++) {
-    const el = buttons.nth(i);
-    const text = filterText(await el.innerText().catch(() => ''));
-    const aria = filterText(await el.getAttribute('aria-label').catch(() => ''));
-    const title = filterText(await el.getAttribute('title').catch(() => ''));
-    if (text.includes('search') || aria.includes('search') || title.includes('search')) {
-      try {
-        await el.click({ timeout: 5000, force: true });
-        return true;
-      } catch (_) {
-        try {
-          await el.evaluate(node => node.click());
-          return true;
-        } catch (_) {}
-      }
-    }
-  }
-
-  const forms = page.locator('form');
-  if (await forms.count()) {
-    try {
-      await forms.first().evaluate(form => form.requestSubmit());
-      return true;
-    } catch (_) {}
-  }
-
-  try {
-    await page.keyboard.press('Enter');
-    return true;
-  } catch (_) {}
-
+  const button = page.getByRole('button', { name: /^Search$/i });
+  if (await button.count()) { await button.last().click({ force: true }); return true; }
   return false;
 }
 
@@ -336,25 +202,19 @@ async function getPureDbSearch(filters) {
   const page = await browser.newPage({ userAgent: 'Mozilla/5.0 Fanservice/1.0' });
   try {
     await page.goto(SEARCH_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForTimeout(1800);
-
+    await page.waitForTimeout(1500);
     const applied = [];
-    if (filters.uma && await setControl(page, ['representative horse girl', 'representative uma', 'representative'], filters.uma)) applied.push(`Uma: ${filters.uma}`);
-    if (filters.blue && await setControl(page, ['blue', 'blue factor', 'blue spark'], filters.blue)) applied.push(`Blue: ${filters.blue}`);
-    if (filters.red && await setControl(page, ['red', 'pink', 'red factor', 'red spark'], filters.red)) applied.push(`Red: ${filters.red}`);
-    if (filters.green && await setControl(page, ['green', 'green factor', 'green spark'], filters.green)) applied.push(`Green: ${filters.green}`);
-    if (filters.whiteMin && await setControl(page, ['white factor total count', 'white factor', 'white'], filters.whiteMin)) applied.push(`White: ${filters.whiteMin}+`);
-
-    if (!await clickPureDbSearch(page)) {
-      throw new Error('Pure DB Search button was not found');
-    }
-
+    if (filters.uma && await setControl(page, ['representative horse girl','representative uma'], filters.uma)) applied.push(`Uma: ${filters.uma}`);
+    if (filters.blue && await setControl(page, ['blue factor','blue'], filters.blue)) applied.push(`Blue: ${filters.blue}`);
+    if (filters.red && await setControl(page, ['red factor','red'], filters.red)) applied.push(`Red: ${filters.red}`);
+    if (filters.green && await setControl(page, ['green factor','green'], filters.green)) applied.push(`Green: ${filters.green}`);
+    if (filters.whiteMin && await setControl(page, ['white factor total count','white factor'], filters.whiteMin)) applied.push(`White: ${filters.whiteMin}+`);
+    await clickPureDbSearch(page);
     await page.waitForTimeout(2500);
 
-    const results = await page.locator('a, tr, [role="row"], [class*="result"], [class*="card"]').evaluateAll(nodes => nodes.map(node => ({
-      text: (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim(),
-      href: node.href || null
-    })).filter(x => /\b\d{9,12}\b/.test(x.text) && x.text.length >= 8).slice(0, 30));
+    const results = await page.locator('a').evaluateAll(anchors => anchors.map(a => ({
+      text: clean(a.innerText || a.textContent || ''), href: a.href || ''
+    })).filter(x => /\b\d{9,12}\b/.test(x.text)).slice(0, 20));
 
     const unique = [];
     const seen = new Set();
@@ -363,10 +223,8 @@ async function getPureDbSearch(filters) {
       if (!id || seen.has(id)) continue;
       seen.add(id);
       unique.push({ ...item, trainerId: id });
-      if (unique.length >= 8) break;
     }
-
-    return { url: page.url(), applied, results: unique, source: 'Umamusume DB (Pure DB)' };
+    return { url: page.url(), applied, results: unique.slice(0, 8), source: 'Umamusume DB (Pure DB)' };
   } finally {
     await browser.close();
   }
