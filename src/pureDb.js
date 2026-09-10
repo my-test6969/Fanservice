@@ -6,6 +6,7 @@ const { chromium } = require('playwright');
 const SEARCH_URL = 'https://uma.pure-db.com/en-us/search';
 const REGISTER_URL = 'https://uma.pure-db.com/en-us/register';
 const BASE = 'https://uma.pure-db.com/en-us/user/global';
+const UMA_MOE_API = 'https://uma.moe/api/v3/search';
 
 function clean(text) {
   return String(text || '').replace(/\s+/g, ' ').trim();
@@ -43,7 +44,7 @@ function section(lines, labels, stops) {
 async function fetchPage(url) {
   const r = await fetch(url, {
     headers: { 'User-Agent': 'Mozilla/5.0 Fanservice/1.0', Accept: 'text/html,application/xhtml+xml' },
-    signal: AbortSignal.timeout(15000)
+    signal: AbortSignal.timeout(12000)
   });
   return r.ok ? r.text() : null;
 }
@@ -76,23 +77,58 @@ function parseProfile(html, trainerId, url) {
   return profile;
 }
 
+function normalizeUmaProfile(data, trainerId) {
+  if (!data || typeof data !== 'object') return null;
+  const item = Array.isArray(data.items) ? data.items.find(x => String(x.account_id ?? x.trainer_id ?? '') === trainerId) || data.items[0] : null;
+  if (!item) return null;
+  if (String(item.account_id ?? item.trainer_id ?? '') !== trainerId) return null;
+
+  const inh = item.inheritance || item.inheritance_record || null;
+  const support = item.support_card || item.supportCard || null;
+  const factor = values => Array.isArray(values) ? values.filter(v => v !== null && v !== undefined).join(', ') : '';
+  return {
+    name: clean(item.trainer_name || item.name),
+    rank: clean(item.trainer_rank || item.rank),
+    fans: item.follower_num ?? item.fan_count ?? item.fans ?? '',
+    representativeUma: clean(item.representative_uma || item.representative || item.main_character_name || ''),
+    supportCard: support ? clean(support.name || support.card_name || `Support Card #${support.support_card_id ?? ''}`) : '',
+    blueSparks: inh ? factor(inh.blue_sparks) : '',
+    redSparks: inh ? factor(inh.pink_sparks) : '',
+    greenSparks: inh ? factor(inh.green_sparks) : '',
+    whiteSparks: inh ? factor(inh.white_sparks) : '',
+    inheritance: inh ? `Main parent #${inh.main_parent_id ?? '?'} • Left #${inh.parent_left_id ?? '?'} • Right #${inh.parent_right_id ?? '?'}` : '',
+    image: clean(item.image || item.avatar || ''),
+    url: `https://uma.moe/search?trainer_id=${encodeURIComponent(trainerId)}`,
+    source: 'uma.moe'
+  };
+}
+
+async function getUmaMoeProfile(trainerId) {
+  const urls = [
+    `${UMA_MOE_API}?trainer_id=${encodeURIComponent(trainerId)}&page=0&limit=20`,
+    `${UMA_MOE_API}?trainer_id=${encodeURIComponent(trainerId)}&search_type=inheritance&page=0&limit=20`
+  ];
+  for (const url of urls) {
+    try {
+      const r = await fetch(url, {
+        headers: { 'User-Agent': 'Fanservice/1.0', Accept: 'application/json' },
+        signal: AbortSignal.timeout(8000)
+      });
+      if (!r.ok) continue;
+      const data = await r.json();
+      const profile = normalizeUmaProfile(data, trainerId);
+      if (profile) return profile;
+    } catch (error) {
+      console.warn(`uma.moe lookup failed: ${error.message}`);
+    }
+  }
+  return null;
+}
+
 async function extractProfileFromPage(page, trainerId) {
   const html = await page.content();
   const parsed = parseProfile(html, trainerId, page.url());
   if (parsed) return parsed;
-
-  const links = await page.locator('a').evaluateAll((anchors, id) => anchors.map(a => ({
-    text: (a.innerText || a.textContent || '').trim(),
-    href: a.href || ''
-  })).filter(x => x.href.includes(id)), trainerId);
-
-  for (const link of links) {
-    try {
-      const html = await fetchPage(link.href);
-      const p = html && parseProfile(html, trainerId, link.href);
-      if (p) return p;
-    } catch (_) {}
-  }
   return null;
 }
 
@@ -100,78 +136,44 @@ async function getProfileWithBrowser(trainerId) {
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ userAgent: 'Mozilla/5.0 Fanservice/1.0' });
   try {
-    await page.goto(REGISTER_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForTimeout(1200);
+    await page.goto(REGISTER_URL, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    await page.waitForTimeout(1000);
 
-    // Pure DB uses generated React/Base UI IDs. Select the input from its
-    // surrounding label instead of guessing by input index. This also avoids
-    // media-player range sliders and other unrelated inputs on the page.
-    const trainerInput = page.locator('input').filter({ has: page.locator('') });
+    const inputs = page.locator('input:not([type="range"]):not([type="hidden"]):not([disabled]):not([readonly])');
     let target = null;
-    const inputs = page.locator('input');
-    const candidates = [];
     for (let i = 0; i < await inputs.count(); i++) {
       const el = inputs.nth(i);
       const info = await el.evaluate(node => {
         const parent = node.parentElement;
         const grand = parent?.parentElement;
-        const nearby = [
-          node.getAttribute('aria-label') || '',
-          node.getAttribute('placeholder') || '',
-          node.getAttribute('name') || '',
-          node.getAttribute('id') || '',
-          parent?.innerText || '',
-          grand?.innerText || ''
+        return [
+          node.getAttribute('aria-label') || '', node.getAttribute('placeholder') || '',
+          node.getAttribute('name') || '', node.getAttribute('id') || '',
+          parent?.innerText || '', grand?.innerText || ''
         ].join(' ');
-        return {
-          type: node.type || '',
-          value: node.value || '',
-          nearby,
-          visible: !!(node.offsetWidth || node.offsetHeight || node.getClientRects().length),
-          disabled: !!node.disabled,
-          readOnly: !!node.readOnly
-        };
-      }).catch(() => null);
-      if (!info || !info.visible || info.disabled || info.readOnly) continue;
-      if (!['text', 'search', 'number', ''].includes(info.type)) continue;
-      candidates.push({ el, info });
-      if (/trainer\s*id|trainerid/i.test(info.nearby)) target = el;
-    }
-
-    // Fallback: the register page has a Game Server control followed by the
-    // Trainer ID text field. Only use editable text-like inputs here.
-    if (!target) {
-      target = candidates.find(x => /trainer|user\s*id|trainerid/i.test(x.info.nearby))?.el || null;
-    }
-    if (!target) {
-      // Prefer an input whose current value is empty and which is not a server
-      // selector. Never select range sliders, since fill() rejects them.
-      const editable = candidates.filter(x => !/global|game\s*server/i.test(x.info.nearby));
-      target = editable[editable.length - 1]?.el || candidates[candidates.length - 1]?.el || null;
+      }).catch(() => '');
+      if (/trainer\s*id|trainerid/i.test(info)) { target = el; break; }
     }
     if (!target) throw new Error('Pure DB Trainer ID input was not found');
 
     await target.fill(String(trainerId));
-
-    const button = page.getByRole('button', { name: /Register\/Refresh Trainer ID/i });
+    const button = page.getByRole('button', { name: /Register\s*\/\s*Refresh Trainer ID/i });
     if (!(await button.count())) throw new Error('Pure DB Register/Refresh button was not found');
-    await button.first().click({ timeout: 10000 });
-
-    await page.waitForTimeout(3500);
-    let profile = await extractProfileFromPage(page, trainerId);
-    if (profile) return profile;
-
-    await page.goto(SEARCH_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForTimeout(1200);
-    profile = await extractProfileFromPage(page, trainerId);
-    if (profile) return profile;
+    await button.first().click({ timeout: 8000 });
+    await page.waitForTimeout(2500);
+    return await extractProfileFromPage(page, trainerId);
   } finally {
     await browser.close();
   }
-  return null;
 }
 
 async function getPureDbProfile(trainerId) {
+  // Primary source: direct uma.moe API. This must never fall through to the
+  // Pure DB UI if the direct source returns a definitive no-result.
+  const umaProfile = await getUmaMoeProfile(trainerId);
+  if (umaProfile) return umaProfile;
+
+  // Secondary source: a known public Pure DB profile route.
   try {
     const html = await fetchPage(`${BASE}/${trainerId}`);
     if (html) {
@@ -182,7 +184,14 @@ async function getPureDbProfile(trainerId) {
     console.warn(`Pure DB direct lookup failed: ${e.message}`);
   }
 
-  return getProfileWithBrowser(trainerId);
+  // Last resort only. UI failures are treated as not-found rather than
+  // breaking /uma-profile with a misleading button/selector error.
+  try {
+    return await getProfileWithBrowser(trainerId);
+  } catch (e) {
+    console.warn(`Pure DB browser fallback failed: ${e.message}`);
+    return null;
+  }
 }
 
 function filterText(value) { return clean(value).toLowerCase(); }
