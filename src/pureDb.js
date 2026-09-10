@@ -1,4 +1,10 @@
 const cheerio = require('cheerio');
+
+// Render's build step bundles Playwright browsers inside node_modules when
+// PLAYWRIGHT_BROWSERS_PATH=0 is used. Set the same value at runtime before
+// loading Playwright so it does not fall back to /opt/render/.cache.
+process.env.PLAYWRIGHT_BROWSERS_PATH = '0';
+
 const { chromium } = require('playwright');
 
 const SEARCH_URL = 'https://uma.pure-db.com/en-us/search';
