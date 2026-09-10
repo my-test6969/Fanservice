@@ -7,12 +7,18 @@ const {
   REST,
   Routes,
   SlashCommandBuilder,
-  EmbedBuilder
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle
 } = require('discord.js');
 
 const { getPureDbProfile, getPureDbSearch, SEARCH_URL } = require('./src/pureDb');
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+const searchPages = new Map();
+const PAGE_SIZE = 5;
+const PAGE_TTL = 10 * 60 * 1000;
 
 const commands = [
   new SlashCommandBuilder()
@@ -38,20 +44,64 @@ function field(name, value) {
   return { name, value: value || 'Not available', inline: true };
 }
 
-function resultLines(results) {
+function resultItems(results) {
   const seen = new Set();
-  const lines = [];
+  const items = [];
   for (const result of results || []) {
     const text = String(result.text || '').replace(/\s+/g, ' ').trim();
-    if (!text || seen.has(text)) continue;
-    seen.add(text);
+    if (!text) continue;
     const id = result.trainerId || text.match(/\b\d{9,12}\b/)?.[0];
-    if (!id) continue;
-    const label = `**${id}**`;
-    lines.push(result.href ? `[${label}](${result.href})` : label);
-    if (lines.length >= 8) break;
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    items.push({ ...result, trainerId: id });
+    if (items.length >= 8) break;
   }
-  return lines;
+  return items;
+}
+
+function buildSearchMessage(search, items, page) {
+  const totalPages = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
+  const safePage = Math.min(Math.max(page, 0), totalPages - 1);
+  const start = safePage * PAGE_SIZE;
+  const visible = items.slice(start, start + PAGE_SIZE);
+  const lines = visible.map(result => {
+    const label = `**${result.trainerId}**`;
+    return result.href ? `[${label}](${result.href})` : label;
+  });
+
+  const embed = new EmbedBuilder()
+    .setTitle('🔎 Umamusume DB Spark / Legacy Search')
+    .setDescription(lines.length
+      ? lines.join('\n')
+      : 'No indexed trainers matched the filters, or Pure DB returned no readable result rows.')
+    .addFields(
+      { name: 'Filters applied', value: search.applied.length ? search.applied.join('\n') : 'None detected' },
+      { name: 'Results', value: `${items.length ? start + 1 : 0}-${Math.min(start + PAGE_SIZE, items.length)} of ${items.length}` },
+      { name: 'Source', value: `[Open Umamusume DB](${search.url || SEARCH_URL})` }
+    )
+    .setFooter({ text: `Fanservice • Page ${safePage + 1}/${totalPages} • 5 users per page` });
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('fanservice_prev')
+      .setLabel('◀ Previous')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(safePage === 0),
+    new ButtonBuilder()
+      .setCustomId('fanservice_next')
+      .setLabel('Next ▶')
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(safePage >= totalPages - 1)
+  );
+
+  return { embeds: [embed], components: [row], page: safePage };
+}
+
+function cleanupSearchPages() {
+  const now = Date.now();
+  for (const [key, value] of searchPages) {
+    if (value.expiresAt <= now) searchPages.delete(key);
+  }
 }
 
 client.once('clientReady', async () => {
@@ -64,6 +114,24 @@ client.once('clientReady', async () => {
 });
 
 client.on('interactionCreate', async interaction => {
+  if (interaction.isButton()) {
+    if (!['fanservice_prev', 'fanservice_next'].includes(interaction.customId)) return;
+
+    cleanupSearchPages();
+    const state = searchPages.get(interaction.message.id);
+    if (!state) {
+      return interaction.reply({ content: '⚠️ This search page has expired. Run `/uma-find` again.', ephemeral: true });
+    }
+
+    const direction = interaction.customId === 'fanservice_next' ? 1 : -1;
+    const totalPages = Math.max(1, Math.ceil(state.items.length / PAGE_SIZE));
+    state.page = Math.min(Math.max(state.page + direction, 0), totalPages - 1);
+    state.expiresAt = Date.now() + PAGE_TTL;
+
+    const message = buildSearchMessage(state.search, state.items, state.page);
+    return interaction.update({ embeds: message.embeds, components: message.components });
+  }
+
   if (!interaction.isChatInputCommand()) return;
 
   if (interaction.commandName === 'uma-profile') {
@@ -114,21 +182,21 @@ client.on('interactionCreate', async interaction => {
     await interaction.deferReply();
     try {
       const search = await getPureDbSearch(filters);
-      const lines = resultLines(search.results);
-      const embed = new EmbedBuilder()
-        .setTitle('🔎 Umamusume DB Spark / Legacy Search')
-        .setDescription(lines.length
-          ? lines.join('\n')
-          : 'No indexed trainers matched the filters, or Pure DB returned no readable result rows.')
-        .addFields(
-          { name: 'Filters applied', value: search.applied.length ? search.applied.join('\n') : 'None detected' },
-          { name: 'Source', value: `[Open Umamusume DB](${search.url || SEARCH_URL})` }
-        )
-        .setFooter({ text: 'Fanservice • live Pure DB search' });
-      return interaction.editReply({ embeds: [embed] });
+      const items = resultItems(search.results);
+      const message = buildSearchMessage(search, items, 0);
+
+      const sent = await interaction.editReply({ embeds: message.embeds, components: message.components });
+      searchPages.set(sent.id, {
+        search,
+        items,
+        page: 0,
+        expiresAt: Date.now() + PAGE_TTL
+      });
+      cleanupSearchPages();
+      return sent;
     } catch (error) {
       console.error('uma-find error:', error);
-      return interaction.editReply('⚠️ Pure DB search failed. The command no longer falls back to ChronoGenesis.');
+      return interaction.editReply('⚠️ Pure DB search failed. Please try the search again.');
     }
   }
 });
