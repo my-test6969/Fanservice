@@ -1,4 +1,5 @@
 require('dotenv').config();
+const http = require('http');
 
 const {
   Client,
@@ -53,7 +54,7 @@ function resultLines(results) {
   return lines;
 }
 
-client.once('ready', async () => {
+client.once('clientReady', async () => {
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
   const route = process.env.GUILD_ID
     ? Routes.applicationGuildCommands(client.user.id, process.env.GUILD_ID)
@@ -128,6 +129,16 @@ client.on('interactionCreate', async interaction => {
       return interaction.editReply(`⚠️ ChronoGenesis search failed. You can still open the live search here: ${SEARCH_URL}`);
     }
   }
+});
+
+const port = Number(process.env.PORT) || 10000;
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+  res.end('Fanservice is online.');
+});
+
+server.listen(port, '0.0.0.0', () => {
+  console.log(`Health server listening on port ${port}`);
 });
 
 client.login(process.env.DISCORD_TOKEN);
