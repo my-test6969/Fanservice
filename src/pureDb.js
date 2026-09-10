@@ -168,8 +168,15 @@ async function clickPureDbSearch(page) {
     for (let i = exactCount - 1; i >= 0; i--) {
       const el = exact.nth(i);
       if (await el.isVisible().catch(() => false)) {
-        await el.click({ timeout: 10000 });
-        return true;
+        try {
+          await el.click({ timeout: 5000, force: true });
+          return true;
+        } catch (_) {
+          try {
+            await el.evaluate(node => node.click());
+            return true;
+          } catch (_) {}
+        }
       }
     }
   }
@@ -182,8 +189,15 @@ async function clickPureDbSearch(page) {
     const aria = filterText(await el.getAttribute('aria-label').catch(() => ''));
     const title = filterText(await el.getAttribute('title').catch(() => ''));
     if (text.includes('search') || aria.includes('search') || title.includes('search')) {
-      await el.click({ timeout: 10000 });
-      return true;
+      try {
+        await el.click({ timeout: 5000, force: true });
+        return true;
+      } catch (_) {
+        try {
+          await el.evaluate(node => node.click());
+          return true;
+        } catch (_) {}
+      }
     }
   }
 
