@@ -10,8 +10,7 @@ const {
   EmbedBuilder
 } = require('discord.js');
 
-const { getPureDbProfile } = require('./src/pureDb');
-const { getChronoGenesisSearch, SEARCH_URL } = require('./src/chronoGenesis');
+const { getPureDbProfile, getPureDbSearch, SEARCH_URL } = require('./src/pureDb');
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
@@ -46,8 +45,9 @@ function resultLines(results) {
     const text = String(result.text || '').replace(/\s+/g, ' ').trim();
     if (!text || seen.has(text)) continue;
     seen.add(text);
-    const id = text.match(/\b\d{9,12}\b/);
-    const label = id ? `**${id[0]}**` : text.slice(0, 180);
+    const id = result.trainerId || text.match(/\b\d{9,12}\b/)?.[0];
+    if (!id) continue;
+    const label = `**${id}**`;
     lines.push(result.href ? `[${label}](${result.href})` : label);
     if (lines.length >= 8) break;
   }
@@ -113,20 +113,22 @@ client.on('interactionCreate', async interaction => {
 
     await interaction.deferReply();
     try {
-      const search = await getChronoGenesisSearch(filters);
+      const search = await getPureDbSearch(filters);
       const lines = resultLines(search.results);
       const embed = new EmbedBuilder()
-        .setTitle('🔎 ChronoGenesis Spark / Legacy Search')
-        .setDescription(lines.length ? lines.join('\n') : 'No readable results were returned. ChronoGenesis may have changed its page layout or returned no matches.')
+        .setTitle('🔎 Umamusume DB Spark / Legacy Search')
+        .setDescription(lines.length
+          ? lines.join('\n')
+          : 'No indexed trainers matched the filters, or Pure DB returned no readable result rows.')
         .addFields(
           { name: 'Filters applied', value: search.applied.length ? search.applied.join('\n') : 'None detected' },
-          { name: 'Source', value: `[Open ChronoGenesis](${search.url || SEARCH_URL})` }
+          { name: 'Source', value: `[Open Umamusume DB](${search.url || SEARCH_URL})` }
         )
-        .setFooter({ text: 'Fanservice • live ChronoGenesis search' });
+        .setFooter({ text: 'Fanservice • live Pure DB search' });
       return interaction.editReply({ embeds: [embed] });
     } catch (error) {
       console.error('uma-find error:', error);
-      return interaction.editReply(`⚠️ ChronoGenesis search failed. You can still open the live search here: ${SEARCH_URL}`);
+      return interaction.editReply('⚠️ Pure DB search failed. The command no longer falls back to ChronoGenesis.');
     }
   }
 });
