@@ -8,6 +8,17 @@ function clean(text) {
   return String(text || '').replace(/\s+/g, ' ').trim();
 }
 
+function visibleLines(html) {
+  const $ = cheerio.load(html);
+  $('script, style, noscript, template').remove();
+  return $('body').text().split('\n').map(clean).filter(Boolean);
+}
+
+function isNotFound(lines) {
+  return lines.some(line => /^user not found$/i.test(line)) ||
+    lines.some(line => /user not found/i.test(line) && line.length < 80);
+}
+
 function findAfter(lines, labels) {
   for (const label of labels) {
     const i = lines.findIndex(line => line.toLowerCase() === label.toLowerCase());
@@ -41,8 +52,13 @@ async function fetchPage(url) {
 
 function parseProfile(html, trainerId, url) {
   const $ = cheerio.load(html);
+  $('script, style, noscript, template').remove();
   const lines = $('body').text().split('\n').map(clean).filter(Boolean);
-  if (!lines.some(line => line.includes(trainerId))) return null;
+
+  // Pure DB's not-found page contains JavaScript which can include the searched
+  // trainer ID. Never treat that script text as profile data.
+  if (isNotFound(lines)) return null;
+  if (!lines.some(line => line === trainerId || line.includes(trainerId))) return null;
 
   const profile = {
     name: '', rank: '', fans: '', representativeUma: '', supportCard: '',
@@ -51,7 +67,10 @@ function parseProfile(html, trainerId, url) {
   };
 
   const idIndex = lines.findIndex(line => line === trainerId || line.includes(trainerId));
-  if (idIndex > 0) profile.name = lines[idIndex - 1];
+  if (idIndex > 0) {
+    const possibleName = lines[idIndex - 1];
+    if (possibleName && possibleName !== trainerId) profile.name = possibleName;
+  }
 
   profile.rank = findAfter(lines, ['Trainer Rank', 'Rank', 'Trainer rank']);
   profile.fans = findAfter(lines, ['Fans', 'Total Fans', 'Fan Count']);
@@ -97,11 +116,10 @@ async function getProfileWithBrowser(trainerId) {
 }
 
 async function getPureDbProfile(trainerId) {
+  // Do not guess arbitrary Pure DB suffixes. A suffix such as /403 is not a
+  // documented universal route and guessing it can produce a false not-found.
   const candidates = [
-    `${BASE}/${trainerId}`,
-    `${BASE}/${trainerId}/403`,
-    `${BASE}/${trainerId}/402`,
-    `${BASE}/${trainerId}/401`
+    `${BASE}/${trainerId}`
   ];
 
   for (const url of candidates) {
