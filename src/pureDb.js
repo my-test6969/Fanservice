@@ -125,7 +125,7 @@ function filterText(value) {
 async function setControl(page, keywords, value) {
   if (value === null || value === undefined || value === '') return false;
   const wanted = filterText(value);
-  const controls = page.locator('input, textarea, select, button');
+  const controls = page.locator('input, textarea, select');
   const count = await controls.count();
 
   for (let i = 0; i < count; i++) {
@@ -137,12 +137,11 @@ async function setControl(page, keywords, value) {
       id: node.id || '',
       placeholder: node.getAttribute('placeholder') || '',
       aria: node.getAttribute('aria-label') || '',
-      title: node.getAttribute('title') || '',
-      text: node.innerText || node.textContent || ''
+      title: node.getAttribute('title') || ''
     })).catch(() => null);
     if (!meta) continue;
 
-    const haystack = filterText([meta.name, meta.id, meta.placeholder, meta.aria, meta.title, meta.text].join(' '));
+    const haystack = filterText([meta.name, meta.id, meta.placeholder, meta.aria, meta.title].join(' '));
     if (!keywords.some(k => haystack.includes(filterText(k)))) continue;
 
     try {
@@ -156,14 +155,6 @@ async function setControl(page, keywords, value) {
       } else if (meta.tag === 'INPUT' && ['text', 'search', 'number', ''].includes(meta.type)) {
         await el.fill(String(value));
         return true;
-      } else if (meta.tag === 'BUTTON') {
-        await el.click();
-        await page.waitForTimeout(250);
-        const option = page.getByText(String(value), { exact: false }).first();
-        if (await option.count()) {
-          await option.click();
-          return true;
-        }
       }
     } catch (_) {}
   }
@@ -171,17 +162,44 @@ async function setControl(page, keywords, value) {
 }
 
 async function clickPureDbSearch(page) {
+  const exact = page.getByText('Search', { exact: true });
+  const exactCount = await exact.count();
+  if (exactCount) {
+    for (let i = exactCount - 1; i >= 0; i--) {
+      const el = exact.nth(i);
+      if (await el.isVisible().catch(() => false)) {
+        await el.click({ timeout: 10000 });
+        return true;
+      }
+    }
+  }
+
   const buttons = page.locator('button, input[type="submit"]');
   const count = await buttons.count();
   for (let i = 0; i < count; i++) {
     const el = buttons.nth(i);
     const text = filterText(await el.innerText().catch(() => ''));
     const aria = filterText(await el.getAttribute('aria-label').catch(() => ''));
-    if (text === 'search' || text.includes('search') || aria.includes('search')) {
-      await el.click();
+    const title = filterText(await el.getAttribute('title').catch(() => ''));
+    if (text.includes('search') || aria.includes('search') || title.includes('search')) {
+      await el.click({ timeout: 10000 });
       return true;
     }
   }
+
+  const forms = page.locator('form');
+  if (await forms.count()) {
+    try {
+      await forms.first().evaluate(form => form.requestSubmit());
+      return true;
+    } catch (_) {}
+  }
+
+  try {
+    await page.keyboard.press('Enter');
+    return true;
+  } catch (_) {}
+
   return false;
 }
 
@@ -200,15 +218,15 @@ async function getPureDbSearch(filters) {
     if (filters.whiteMin && await setControl(page, ['white factor total count', 'white factor', 'white'], filters.whiteMin)) applied.push(`White: ${filters.whiteMin}+`);
 
     if (!await clickPureDbSearch(page)) {
-      throw new Error('Pure DB search button was not found');
+      throw new Error('Pure DB Search button was not found');
     }
 
-    await page.waitForTimeout(2200);
+    await page.waitForTimeout(2500);
 
     const results = await page.locator('a, tr, [role="row"], [class*="result"], [class*="card"]').evaluateAll(nodes => nodes.map(node => ({
       text: (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim(),
       href: node.href || null
-    })).filter(x => /\b\d{9,12}\b/.test(x.text) && x.text.length >= 8).slice(0, 20));
+    })).filter(x => /\b\d{9,12}\b/.test(x.text) && x.text.length >= 8).slice(0, 30));
 
     const unique = [];
     const seen = new Set();
