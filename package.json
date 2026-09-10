@@ -1,0 +1,17 @@
+{
+  "name": "fanservice",
+  "version": "1.0.0",
+  "description": "Discord bot for Umamusume Global trainer profiles and spark/legacy searching.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "cheerio": "^1.1.2",
+    "discord.js": "^14.24.2",
+    "dotenv": "^17.2.2"
+  }
+}
