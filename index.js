@@ -71,9 +71,7 @@ function buildSearchMessage(search, items, page) {
 
   const embed = new EmbedBuilder()
     .setTitle('🔎 Umamusume DB Spark / Legacy Search')
-    .setDescription(lines.length
-      ? lines.join('\n')
-      : 'No indexed trainers matched the filters, or Pure DB returned no readable result rows.')
+    .setDescription(lines.length ? lines.join('\n') : 'No indexed trainers matched the filters, or Pure DB returned no readable result rows.')
     .addFields(
       { name: 'Filters applied', value: search.applied.length ? search.applied.join('\n') : 'None detected' },
       { name: 'Results', value: `${items.length ? start + 1 : 0}-${Math.min(start + PAGE_SIZE, items.length)} of ${items.length}` },
@@ -82,16 +80,8 @@ function buildSearchMessage(search, items, page) {
     .setFooter({ text: `Fanservice • Page ${safePage + 1}/${totalPages} • 5 users per page` });
 
   const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId('fanservice_prev')
-      .setLabel('◀ Previous')
-      .setStyle(ButtonStyle.Secondary)
-      .setDisabled(safePage === 0),
-    new ButtonBuilder()
-      .setCustomId('fanservice_next')
-      .setLabel('Next ▶')
-      .setStyle(ButtonStyle.Primary)
-      .setDisabled(safePage >= totalPages - 1)
+    new ButtonBuilder().setCustomId('fanservice_prev').setLabel('◀ Previous').setStyle(ButtonStyle.Secondary).setDisabled(safePage === 0),
+    new ButtonBuilder().setCustomId('fanservice_next').setLabel('Next ▶').setStyle(ButtonStyle.Primary).setDisabled(safePage >= totalPages - 1)
   );
 
   return { embeds: [embed], components: [row], page: safePage };
@@ -105,29 +95,31 @@ function cleanupSearchPages() {
 }
 
 client.once('clientReady', async () => {
-  const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
-  const route = process.env.GUILD_ID
-    ? Routes.applicationGuildCommands(client.user.id, process.env.GUILD_ID)
-    : Routes.applicationCommands(client.user.id);
-  await rest.put(route, { body: commands });
-  console.log(`Fanservice online as ${client.user.tag}`);
+  try {
+    const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
+    const route = process.env.GUILD_ID
+      ? Routes.applicationGuildCommands(client.user.id, process.env.GUILD_ID)
+      : Routes.applicationCommands(client.user.id);
+    await rest.put(route, { body: commands });
+    console.log(`Fanservice online as ${client.user.tag}`);
+    console.log(`Registered ${commands.length} slash commands using ${process.env.GUILD_ID ? 'guild' : 'global'} registration.`);
+  } catch (error) {
+    console.error('Command registration error:', error);
+  }
 });
 
 client.on('interactionCreate', async interaction => {
+  console.log(`Interaction received: ${interaction.type} ${interaction.commandName || interaction.customId || 'unknown'}`);
+
   if (interaction.isButton()) {
     if (!['fanservice_prev', 'fanservice_next'].includes(interaction.customId)) return;
-
     cleanupSearchPages();
     const state = searchPages.get(interaction.message.id);
-    if (!state) {
-      return interaction.reply({ content: '⚠️ This search page has expired. Run `/uma-find` again.', ephemeral: true });
-    }
-
+    if (!state) return interaction.reply({ content: '⚠️ This search page has expired. Run `/uma-find` again.', ephemeral: true });
     const direction = interaction.customId === 'fanservice_next' ? 1 : -1;
     const totalPages = Math.max(1, Math.ceil(state.items.length / PAGE_SIZE));
     state.page = Math.min(Math.max(state.page + direction, 0), totalPages - 1);
     state.expiresAt = Date.now() + PAGE_TTL;
-
     const message = buildSearchMessage(state.search, state.items, state.page);
     return interaction.update({ embeds: message.embeds, components: message.components });
   }
@@ -136,15 +128,18 @@ client.on('interactionCreate', async interaction => {
 
   if (interaction.commandName === 'uma-profile') {
     const trainerId = interaction.options.getString('trainer_id', true).trim();
-    if (!validTrainerId(trainerId)) {
-      return interaction.reply({ content: '❌ Please enter the 9–12 digit numeric Global Trainer ID.', ephemeral: true });
+    if (!validTrainerId(trainerId)) return interaction.reply({ content: '❌ Please enter the 9–12 digit numeric Global Trainer ID.', ephemeral: true });
+
+    try {
+      await interaction.deferReply();
+    } catch (error) {
+      console.error('uma-profile defer failed:', error);
+      return;
     }
 
-    await interaction.deferReply();
     try {
       const profile = await getPureDbProfile(trainerId);
       if (!profile) return interaction.editReply(`❌ I couldn't find **${trainerId}** in the indexed Global databases.`);
-
       const embed = new EmbedBuilder()
         .setTitle(`🐎 ${profile.name || 'Trainer Profile'}`)
         .setDescription(`**Trainer ID:** ${trainerId}`)
@@ -166,6 +161,13 @@ client.on('interactionCreate', async interaction => {
   }
 
   if (interaction.commandName === 'uma-find') {
+    try {
+      await interaction.deferReply();
+    } catch (error) {
+      console.error('uma-find defer failed:', error);
+      return;
+    }
+
     const filters = {
       uma: interaction.options.getString('uma'),
       blue: interaction.options.getString('blue'),
@@ -175,31 +177,26 @@ client.on('interactionCreate', async interaction => {
       mlbSupport: interaction.options.getBoolean('mlb_support')
     };
 
-    if (!Object.values(filters).some(Boolean)) {
-      return interaction.reply({ content: '❌ Give me at least one search filter, such as `blue: Speed 3` or `red: Turf 3`.', ephemeral: true });
-    }
+    if (!Object.values(filters).some(Boolean)) return interaction.editReply('❌ Give me at least one search filter, such as `blue: Speed 3` or `red: Turf 3`.');
 
-    await interaction.deferReply();
     try {
+      console.log('Starting Pure DB search:', JSON.stringify(filters));
       const search = await getPureDbSearch(filters);
       const items = resultItems(search.results);
       const message = buildSearchMessage(search, items, 0);
-
       const sent = await interaction.editReply({ embeds: message.embeds, components: message.components });
-      searchPages.set(sent.id, {
-        search,
-        items,
-        page: 0,
-        expiresAt: Date.now() + PAGE_TTL
-      });
+      searchPages.set(sent.id, { search, items, page: 0, expiresAt: Date.now() + PAGE_TTL });
       cleanupSearchPages();
       return sent;
     } catch (error) {
       console.error('uma-find error:', error);
-      return interaction.editReply('⚠️ Pure DB search failed. Please try the search again.');
+      return interaction.editReply(`⚠️ Pure DB search failed: ${String(error.message || error).slice(0, 1500)}`);
     }
   }
 });
+
+client.on('error', error => console.error('Discord client error:', error));
+client.on('warn', message => console.warn('Discord warning:', message));
 
 const port = Number(process.env.PORT) || 10000;
 const server = http.createServer((req, res) => {
@@ -207,8 +204,6 @@ const server = http.createServer((req, res) => {
   res.end('Fanservice is online.');
 });
 
-server.listen(port, '0.0.0.0', () => {
-  console.log(`Health server listening on port ${port}`);
-});
+server.listen(port, '0.0.0.0', () => console.log(`Health server listening on port ${port}`));
 
-client.login(process.env.DISCORD_TOKEN);
+client.login(process.env.DISCORD_TOKEN).catch(error => console.error('Discord login failed:', error));
