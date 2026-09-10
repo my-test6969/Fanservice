@@ -10,6 +10,7 @@ const {
 } = require('discord.js');
 
 const { getPureDbProfile } = require('./src/pureDb');
+const { getChronoGenesisSearch } = require('./src/chronoGenesis');
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
@@ -119,16 +120,18 @@ client.on('interactionCreate', async interaction => {
     if (mlb) filters.push('MLB support: **preferred**');
 
     const description = filters.length ? filters.join('\n') : 'No filters supplied.';
+    const chrono = await getChronoGenesisSearch();
 
     const embed = new EmbedBuilder()
       .setTitle('🔎 Uma Legacy / Spark Search')
       .setDescription(description)
       .addFields(
+        { name: 'ChronoGenesis — Spark/Legacy Search', value: `[Open ChronoGenesis trainer search](${chrono.url})\nSupports blue, red, green and white sparks, legacy/parent Uma and support-card filtering.` },
         { name: 'Pure DB', value: '[Open Global advanced friend search](https://uma-global.pure-db.com/#/search)' },
-        { name: 'uma.moe', value: '[Open trainer / inheritance search](https://uma.moe/)' },
-        { name: 'ChronoGenesis', value: '[Open trainer search](https://chronogenesis.net/)' }
+        { name: 'uma.moe', value: '[Open trainer / inheritance database](https://uma.moe/database)' },
+        { name: 'Hakuraku', value: '[Open race analysis / logs](https://hakuraku.moe/umalogs)' }
       )
-      .setFooter({ text: 'Fanservice • search sources' });
+      .setFooter({ text: 'Fanservice • ChronoGenesis + Global Uma databases' });
 
     await interaction.reply({ embeds: [embed] });
   }
