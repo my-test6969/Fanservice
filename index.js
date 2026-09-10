@@ -10,7 +10,7 @@ const {
 } = require('discord.js');
 
 const { getPureDbProfile } = require('./src/pureDb');
-const { getChronoGenesisSearch } = require('./src/chronoGenesis');
+const { getChronoGenesisSearch, SEARCH_URL } = require('./src/chronoGenesis');
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
@@ -18,20 +18,16 @@ const commands = [
   new SlashCommandBuilder()
     .setName('uma-profile')
     .setDescription('Look up a Global Uma Musume trainer by Trainer ID.')
-    .addStringOption(option =>
-      option.setName('trainer_id')
-        .setDescription('Your 9–12 digit Global Trainer ID')
-        .setRequired(true)
-    ),
+    .addStringOption(option => option.setName('trainer_id').setDescription('Your 9–12 digit Global Trainer ID').setRequired(true)),
   new SlashCommandBuilder()
     .setName('uma-find')
-    .setDescription('Find Global trainers/legacies by representative Uma and spark criteria.')
+    .setDescription('Search Global trainers/legacies for sparks and support cards.')
     .addStringOption(option => option.setName('uma').setDescription('Representative Uma name'))
     .addStringOption(option => option.setName('blue').setDescription('Blue spark, e.g. Speed 3'))
-    .addStringOption(option => option.setName('red').setDescription('Red spark, e.g. Turf 3'))
+    .addStringOption(option => option.setName('red').setDescription('Red/pink spark, e.g. Turf 3'))
     .addStringOption(option => option.setName('green').setDescription('Green spark / unique'))
     .addIntegerOption(option => option.setName('white_min').setDescription('Minimum total white sparks').setMinValue(1).setMaxValue(18))
-    .addBooleanOption(option => option.setName('mlb_support').setDescription('Prefer trainers with an MLB support card'))
+    .addBooleanOption(option => option.setName('mlb_support').setDescription('Prefer an MLB support card'))
 ].map(command => command.toJSON());
 
 function validTrainerId(value) {
@@ -42,15 +38,28 @@ function field(name, value) {
   return { name, value: value || 'Not available', inline: true };
 }
 
+function resultLines(results) {
+  const seen = new Set();
+  const lines = [];
+  for (const result of results || []) {
+    const text = String(result.text || '').replace(/\s+/g, ' ').trim();
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    const id = text.match(/\b\d{9,12}\b/);
+    const label = id ? `**${id[0]}**` : text.slice(0, 180);
+    lines.push(result.href ? `[${label}](${result.href})` : label);
+    if (lines.length >= 8) break;
+  }
+  return lines;
+}
+
 client.once('ready', async () => {
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
   const route = process.env.GUILD_ID
     ? Routes.applicationGuildCommands(client.user.id, process.env.GUILD_ID)
     : Routes.applicationCommands(client.user.id);
-
   await rest.put(route, { body: commands });
   console.log(`Fanservice online as ${client.user.tag}`);
-  console.log(`Commands registered ${process.env.GUILD_ID ? 'for guild ' + process.env.GUILD_ID : 'globally'}.`);
 });
 
 client.on('interactionCreate', async interaction => {
@@ -58,82 +67,66 @@ client.on('interactionCreate', async interaction => {
 
   if (interaction.commandName === 'uma-profile') {
     const trainerId = interaction.options.getString('trainer_id', true).trim();
-
     if (!validTrainerId(trainerId)) {
-      return interaction.reply({
-        content: '❌ That does not look like a valid Trainer ID. Please enter the 9–12 digit numeric ID from Global.',
-        ephemeral: true
-      });
+      return interaction.reply({ content: '❌ Please enter the 9–12 digit numeric Global Trainer ID.', ephemeral: true });
     }
 
     await interaction.deferReply();
-
     try {
       const profile = await getPureDbProfile(trainerId);
-
-      if (!profile) {
-        return interaction.editReply({
-          content: `❌ I couldn't find **${trainerId}** in the indexed Global databases.\n\nThe trainer may not have registered/uploaded their data yet.`
-        });
-      }
+      if (!profile) return interaction.editReply(`❌ I couldn't find **${trainerId}** in the indexed Global databases.`);
 
       const embed = new EmbedBuilder()
         .setTitle(`🐎 ${profile.name || 'Trainer Profile'}`)
         .setDescription(`**Trainer ID:** ${trainerId}`)
         .addFields(
-          field('Trainer Rank', profile.rank),
-          field('Fans', profile.fans),
-          field('Representative Uma', profile.representativeUma),
-          field('Support Card', profile.supportCard),
-          field('Blue Sparks', profile.blueSparks),
-          field('Red Sparks', profile.redSparks),
-          field('Green Sparks', profile.greenSparks),
-          field('White Sparks', profile.whiteSparks),
+          field('Trainer Rank', profile.rank), field('Fans', profile.fans),
+          field('Representative Uma', profile.representativeUma), field('Support Card', profile.supportCard),
+          field('Blue Sparks', profile.blueSparks), field('Red Sparks', profile.redSparks),
+          field('Green Sparks', profile.greenSparks), field('White Sparks', profile.whiteSparks),
           field('Inheritance', profile.inheritance)
         )
         .setFooter({ text: 'Fanservice • Global indexed data' });
-
       if (profile.url) embed.setURL(profile.url);
       if (profile.image) embed.setThumbnail(profile.image);
-
-      await interaction.editReply({ embeds: [embed] });
+      return interaction.editReply({ embeds: [embed] });
     } catch (error) {
       console.error('uma-profile error:', error);
-      await interaction.editReply('⚠️ The profile lookup failed while contacting the public database. Please try again later.');
+      return interaction.editReply('⚠️ The profile lookup failed.');
     }
   }
 
   if (interaction.commandName === 'uma-find') {
-    const uma = interaction.options.getString('uma');
-    const blue = interaction.options.getString('blue');
-    const red = interaction.options.getString('red');
-    const green = interaction.options.getString('green');
-    const whiteMin = interaction.options.getInteger('white_min');
-    const mlb = interaction.options.getBoolean('mlb_support');
+    const filters = {
+      uma: interaction.options.getString('uma'),
+      blue: interaction.options.getString('blue'),
+      red: interaction.options.getString('red'),
+      green: interaction.options.getString('green'),
+      whiteMin: interaction.options.getInteger('white_min'),
+      mlbSupport: interaction.options.getBoolean('mlb_support')
+    };
 
-    const filters = [];
-    if (uma) filters.push(`Uma: **${uma}**`);
-    if (blue) filters.push(`Blue: **${blue}**`);
-    if (red) filters.push(`Red: **${red}**`);
-    if (green) filters.push(`Green: **${green}**`);
-    if (whiteMin) filters.push(`White sparks: **${whiteMin}+**`);
-    if (mlb) filters.push('MLB support: **preferred**');
+    if (!Object.values(filters).some(Boolean)) {
+      return interaction.reply({ content: '❌ Give me at least one search filter, such as `blue: Speed 3` or `red: Turf 3`.', ephemeral: true });
+    }
 
-    const description = filters.length ? filters.join('\n') : 'No filters supplied.';
-    const chrono = await getChronoGenesisSearch();
-
-    const embed = new EmbedBuilder()
-      .setTitle('🔎 Uma Legacy / Spark Search')
-      .setDescription(description)
-      .addFields(
-        { name: 'ChronoGenesis — Spark/Legacy Search', value: `[Open ChronoGenesis trainer search](${chrono.url})\nSupports blue, red, green and white sparks, legacy/parent Uma and support-card filtering.` },
-        { name: 'Pure DB', value: '[Open Global advanced friend search](https://uma-global.pure-db.com/#/search)' },
-        { name: 'uma.moe', value: '[Open trainer / inheritance database](https://uma.moe/database)' },
-        { name: 'Hakuraku', value: '[Open race analysis / logs](https://hakuraku.moe/umalogs)' }
-      )
-      .setFooter({ text: 'Fanservice • ChronoGenesis + Global Uma databases' });
-
-    await interaction.reply({ embeds: [embed] });
+    await interaction.deferReply();
+    try {
+      const search = await getChronoGenesisSearch(filters);
+      const lines = resultLines(search.results);
+      const embed = new EmbedBuilder()
+        .setTitle('🔎 ChronoGenesis Spark / Legacy Search')
+        .setDescription(lines.length ? lines.join('\n') : 'No readable results were returned. ChronoGenesis may have changed its page layout or returned no matches.')
+        .addFields(
+          { name: 'Filters applied', value: search.applied.length ? search.applied.join('\n') : 'None detected' },
+          { name: 'Source', value: `[Open ChronoGenesis](${search.url || SEARCH_URL})` }
+        )
+        .setFooter({ text: 'Fanservice • live ChronoGenesis search' });
+      return interaction.editReply({ embeds: [embed] });
+    } catch (error) {
+      console.error('uma-find error:', error);
+      return interaction.editReply(`⚠️ ChronoGenesis search failed. You can still open the live search here: ${SEARCH_URL}`);
+    }
   }
 });
 
