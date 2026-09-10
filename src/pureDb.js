@@ -68,8 +68,6 @@ function parseProfile(html, trainerId, url) {
     url
   };
 
-  // Pure DB renders the actual factor rows as text. Keep the parser conservative
-  // instead of mixing unrelated skills into the spark fields.
   const factorLines = lines.filter(x => /★\d+/.test(x));
   profile.blueSparks = factorLines.filter(x => /speed|stamina|power|guts|wit/i.test(x)).slice(0, 12).join(' • ') || 'Not available';
   profile.redSparks = factorLines.filter(x => /sprint|mile|medium|long|turf|dirt|aptitude/i.test(x)).slice(0, 12).join(' • ') || 'Not available';
@@ -102,46 +100,67 @@ async function getProfileWithBrowser(trainerId) {
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ userAgent: 'Mozilla/5.0 Fanservice/1.0' });
   try {
-    // The real Pure DB page explicitly exposes this as Register/Refresh Trainer ID.
-    // Do not guess field IDs: this is a React/Base UI page with generated IDs.
     await page.goto(REGISTER_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForTimeout(1200);
 
+    // Pure DB uses generated React/Base UI IDs. Select the input from its
+    // surrounding label instead of guessing by input index. This also avoids
+    // media-player range sliders and other unrelated inputs on the page.
+    const trainerInput = page.locator('input').filter({ has: page.locator('') });
+    let target = null;
     const inputs = page.locator('input');
     const candidates = [];
     for (let i = 0; i < await inputs.count(); i++) {
       const el = inputs.nth(i);
-      const info = await el.evaluate(node => ({
-        type: node.type || '',
-        value: node.value || '',
-        placeholder: node.getAttribute('placeholder') || '',
-        aria: node.getAttribute('aria-label') || '',
-        name: node.getAttribute('name') || '',
-        visible: !!(node.offsetWidth || node.offsetHeight || node.getClientRects().length)
-      })).catch(() => null);
-      if (info && info.visible && !['hidden','submit','button'].includes(info.type)) candidates.push({ el, info });
+      const info = await el.evaluate(node => {
+        const parent = node.parentElement;
+        const grand = parent?.parentElement;
+        const nearby = [
+          node.getAttribute('aria-label') || '',
+          node.getAttribute('placeholder') || '',
+          node.getAttribute('name') || '',
+          node.getAttribute('id') || '',
+          parent?.innerText || '',
+          grand?.innerText || ''
+        ].join(' ');
+        return {
+          type: node.type || '',
+          value: node.value || '',
+          nearby,
+          visible: !!(node.offsetWidth || node.offsetHeight || node.getClientRects().length),
+          disabled: !!node.disabled,
+          readOnly: !!node.readOnly
+        };
+      }).catch(() => null);
+      if (!info || !info.visible || info.disabled || info.readOnly) continue;
+      if (!['text', 'search', 'number', ''].includes(info.type)) continue;
+      candidates.push({ el, info });
+      if (/trainer\s*id|trainerid/i.test(info.nearby)) target = el;
     }
 
-    // On /register the first control is the Game Server selector and the
-    // Trainer ID is the following text/search input. Prefer a field whose
-    // metadata says trainer/id; otherwise use the last visible text input.
-    let trainerInput = candidates.find(x => /trainer|user.*id|id.*trainer/i.test(`${x.info.placeholder} ${x.info.aria} ${x.info.name}`));
-    if (!trainerInput) trainerInput = [...candidates].reverse().find(x => /text|search|number/.test(x.info.type) || !x.info.type);
-    if (!trainerInput) throw new Error('Pure DB Trainer ID input was not found');
+    // Fallback: the register page has a Game Server control followed by the
+    // Trainer ID text field. Only use editable text-like inputs here.
+    if (!target) {
+      target = candidates.find(x => /trainer|user\s*id|trainerid/i.test(x.info.nearby))?.el || null;
+    }
+    if (!target) {
+      // Prefer an input whose current value is empty and which is not a server
+      // selector. Never select range sliders, since fill() rejects them.
+      const editable = candidates.filter(x => !/global|game\s*server/i.test(x.info.nearby));
+      target = editable[editable.length - 1]?.el || candidates[candidates.length - 1]?.el || null;
+    }
+    if (!target) throw new Error('Pure DB Trainer ID input was not found');
 
-    await trainerInput.el.fill(trainerId);
+    await target.fill(String(trainerId));
 
     const button = page.getByRole('button', { name: /Register\/Refresh Trainer ID/i });
     if (!(await button.count())) throw new Error('Pure DB Register/Refresh button was not found');
     await button.first().click({ timeout: 10000 });
 
-    // Registration can navigate to the generated /user/global/<id>/<suffix>
-    // profile, or update the current DOM with a profile link.
     await page.waitForTimeout(3500);
     let profile = await extractProfileFromPage(page, trainerId);
     if (profile) return profile;
 
-    // If registration leaves us on another page, search the main page again.
     await page.goto(SEARCH_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForTimeout(1200);
     profile = await extractProfileFromPage(page, trainerId);
@@ -153,7 +172,6 @@ async function getProfileWithBrowser(trainerId) {
 }
 
 async function getPureDbProfile(trainerId) {
-  // Fast path for known profile URLs.
   try {
     const html = await fetchPage(`${BASE}/${trainerId}`);
     if (html) {
@@ -164,7 +182,6 @@ async function getPureDbProfile(trainerId) {
     console.warn(`Pure DB direct lookup failed: ${e.message}`);
   }
 
-  // Correct fallback: use Pure DB's actual Register/Refresh Trainer ID page.
   return getProfileWithBrowser(trainerId);
 }
 
@@ -184,7 +201,8 @@ async function setControl(page, keywords, value) {
     if (!keywords.some(k => hay.includes(filterText(k)))) continue;
     try {
       if (meta.tag === 'SELECT') await el.selectOption({ label: String(value) });
-      else await el.fill(String(value));
+      else if (['text', 'search', 'number', ''].includes(meta.type)) await el.fill(String(value));
+      else continue;
       return true;
     } catch (_) {}
   }
