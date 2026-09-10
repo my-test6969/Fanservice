@@ -57,7 +57,6 @@ function parseProfile(html, trainerId, url) {
   profile.fans = findAfter(lines, ['Fans', 'Total Fans', 'Fan Count']);
   profile.representativeUma = findAfter(lines, ['Representative Horse Girl', 'Representative Uma', 'Representative']);
   profile.supportCard = findAfter(lines, ['Support Card', 'Representative Support Card']);
-
   profile.inheritance = findSection(lines, ['Inheritance1', 'Inheritance 1'], ['Inheritance2', 'Inheritance 2', 'Skills']);
 
   const sparkWords = lines.filter(line => /speed|stamina|power|guts|wit|sprint|mile|medium|long|turf|dirt|ura|factor|spark/i.test(line));
@@ -68,7 +67,6 @@ function parseProfile(html, trainerId, url) {
 
   const image = $('img').toArray().map(el => $(el).attr('src')).find(src => src && /^https?:/.test(src));
   profile.image = image || '';
-
   return profile;
 }
 
@@ -120,4 +118,112 @@ async function getPureDbProfile(trainerId) {
   return getProfileWithBrowser(trainerId);
 }
 
-module.exports = { getPureDbProfile };
+function filterText(value) {
+  return clean(value).toLowerCase();
+}
+
+async function setControl(page, keywords, value) {
+  if (value === null || value === undefined || value === '') return false;
+  const wanted = filterText(value);
+  const controls = page.locator('input, textarea, select, button');
+  const count = await controls.count();
+
+  for (let i = 0; i < count; i++) {
+    const el = controls.nth(i);
+    const meta = await el.evaluate(node => ({
+      tag: node.tagName,
+      type: node.getAttribute('type') || '',
+      name: node.getAttribute('name') || '',
+      id: node.id || '',
+      placeholder: node.getAttribute('placeholder') || '',
+      aria: node.getAttribute('aria-label') || '',
+      title: node.getAttribute('title') || '',
+      text: node.innerText || node.textContent || ''
+    })).catch(() => null);
+    if (!meta) continue;
+
+    const haystack = filterText([meta.name, meta.id, meta.placeholder, meta.aria, meta.title, meta.text].join(' '));
+    if (!keywords.some(k => haystack.includes(filterText(k)))) continue;
+
+    try {
+      if (meta.tag === 'SELECT') {
+        const options = await el.locator('option').allTextContents();
+        const match = options.find(x => filterText(x).includes(wanted));
+        if (match) {
+          await el.selectOption({ label: match });
+          return true;
+        }
+      } else if (meta.tag === 'INPUT' && ['text', 'search', 'number', ''].includes(meta.type)) {
+        await el.fill(String(value));
+        return true;
+      } else if (meta.tag === 'BUTTON') {
+        await el.click();
+        await page.waitForTimeout(250);
+        const option = page.getByText(String(value), { exact: false }).first();
+        if (await option.count()) {
+          await option.click();
+          return true;
+        }
+      }
+    } catch (_) {}
+  }
+  return false;
+}
+
+async function clickPureDbSearch(page) {
+  const buttons = page.locator('button, input[type="submit"]');
+  const count = await buttons.count();
+  for (let i = 0; i < count; i++) {
+    const el = buttons.nth(i);
+    const text = filterText(await el.innerText().catch(() => ''));
+    const aria = filterText(await el.getAttribute('aria-label').catch(() => ''));
+    if (text === 'search' || text.includes('search') || aria.includes('search')) {
+      await el.click();
+      return true;
+    }
+  }
+  return false;
+}
+
+async function getPureDbSearch(filters) {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ userAgent: 'Mozilla/5.0 Fanservice/1.0' });
+  try {
+    await page.goto(SEARCH_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(1800);
+
+    const applied = [];
+    if (filters.uma && await setControl(page, ['representative horse girl', 'representative uma', 'representative'], filters.uma)) applied.push(`Uma: ${filters.uma}`);
+    if (filters.blue && await setControl(page, ['blue', 'blue factor', 'blue spark'], filters.blue)) applied.push(`Blue: ${filters.blue}`);
+    if (filters.red && await setControl(page, ['red', 'pink', 'red factor', 'red spark'], filters.red)) applied.push(`Red: ${filters.red}`);
+    if (filters.green && await setControl(page, ['green', 'green factor', 'green spark'], filters.green)) applied.push(`Green: ${filters.green}`);
+    if (filters.whiteMin && await setControl(page, ['white factor total count', 'white factor', 'white'], filters.whiteMin)) applied.push(`White: ${filters.whiteMin}+`);
+
+    if (!await clickPureDbSearch(page)) {
+      throw new Error('Pure DB search button was not found');
+    }
+
+    await page.waitForTimeout(2200);
+
+    const results = await page.locator('a, tr, [role="row"], [class*="result"], [class*="card"]').evaluateAll(nodes => nodes.map(node => ({
+      text: (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim(),
+      href: node.href || null
+    })).filter(x => /\b\d{9,12}\b/.test(x.text) && x.text.length >= 8).slice(0, 20));
+
+    const unique = [];
+    const seen = new Set();
+    for (const item of results) {
+      const id = item.text.match(/\b\d{9,12}\b/)?.[0];
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      unique.push({ ...item, trainerId: id });
+      if (unique.length >= 8) break;
+    }
+
+    return { url: page.url(), applied, results: unique, source: 'Umamusume DB (Pure DB)' };
+  } finally {
+    await browser.close();
+  }
+}
+
+module.exports = { getPureDbProfile, getPureDbSearch, SEARCH_URL };
