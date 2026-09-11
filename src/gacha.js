@@ -41,8 +41,7 @@ function rarityStars(rarity) {
 }
 
 function resultLine(result) {
-  const rate = result.rateUp ? ' ✨ RATE UP' : '';
-  return `${rarityStars(result.rarity)} **${result.name}**${rate}`;
+  return `${rarityStars(result.rarity)} **${result.name}**${result.rateUp ? ' ✨ RATE UP' : ''}`;
 }
 
 function slugify(name) {
@@ -62,13 +61,18 @@ async function fetchImageUrl(name) {
     try {
       const slug = slugify(baseName);
       const response = await fetch(`https://gametora.com/umamusume/characters/${slug}`, {
-        signal: AbortSignal.timeout(3000),
+        signal: AbortSignal.timeout(4000),
         headers: { 'User-Agent': 'Fanservice-Gacha/1.0' }
       });
       if (!response.ok) return null;
       const html = await response.text();
-      const matches = html.match(/https?:\/\/media\.gametora\.com\/umamusume\/characters\/[^"'\\s]+/g) || [];
-      return matches.find(url => /\.png(?:\?|$)/i.test(url)) || null;
+
+      const og = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i)
+        || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
+      if (og && og[1]) return og[1].replace(/&amp;/g, '&');
+
+      const images = html.match(/https?:\/\/gametora\.com\/images\/umamusume\/characters\/[^"'\\s]+\.png/gi) || [];
+      return images[0] || null;
     } catch (_) {
       return null;
     }
@@ -82,10 +86,12 @@ async function fetchImageData(name) {
   const url = await fetchImageUrl(name);
   if (!url) return null;
   try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(3000) });
+    const response = await fetch(url, {
+      signal: AbortSignal.timeout(4000),
+      headers: { 'User-Agent': 'Fanservice-Gacha/1.0' }
+    });
     if (!response.ok) return null;
-    const buffer = Buffer.from(await response.arrayBuffer());
-    return `data:image/png;base64,${buffer.toString('base64')}`;
+    return Buffer.from(await response.arrayBuffer());
   } catch (_) {
     return null;
   }
@@ -100,75 +106,94 @@ function escapeXml(value) {
     .replace(/'/g, '&apos;');
 }
 
-function cardSvg(result, image, x, y, width, height) {
-  const border = result.rarity === 3 ? '#f2c94c' : result.rarity === 2 ? '#d9e3ef' : '#e4e4e4';
-  const glow = result.rarity === 3 ? `filter="url(#glow)"` : '';
-  const stars = `${'★'.repeat(result.rarity)}${'☆'.repeat(3 - result.rarity)}`;
-  const bonus = result.rarity === 3 ? 'x90' : result.rarity === 2 ? 'x10' : 'x5';
-  const bonusText = result.rarity === 3 ? 'Bonus' : 'Bonus';
-  const innerX = x + 10;
-  const innerY = y + 10;
-  const innerW = width - 20;
-  const innerH = width - 20;
-  const clipId = `clip${x}${y}`;
+function starPolygon(cx, cy, outer, inner, filled, key) {
+  const points = [];
+  for (let i = 0; i < 10; i++) {
+    const angle = -Math.PI / 2 + i * Math.PI / 5;
+    const radius = i % 2 === 0 ? outer : inner;
+    points.push(`${cx + Math.cos(angle) * radius},${cy + Math.sin(angle) * radius}`);
+  }
+  return `<polygon key="${key}" points="${points.join(' ')}" fill="${filled ? '#ffc928' : '#d7dce2'}" stroke="#8b6412" stroke-width="2"/>`;
+}
+
+function starsSvg(rarity, cx, cy, size = 25) {
+  let out = '';
+  const start = cx - size * 2.1;
+  for (let i = 0; i < 3; i++) {
+    out += starPolygon(start + i * size * 2.1, cy, size, size * 0.45, i < rarity, `${cx}-${cy}-${i}`);
+  }
+  return out;
+}
+
+function cardSvg(result, image, x, y, width) {
+  const imageSize = width - 24;
+  const cardHeight = imageSize + 62;
+  const border = result.rarity === 3 ? '#f3cf5b' : '#cfd7e2';
+  const glow = result.rarity === 3
+    ? `<rect x="${x - 8}" y="${y - 8}" width="${width + 16}" height="${cardHeight + 16}" rx="25" fill="none" stroke="#ffe56d" stroke-width="8" opacity=".8" filter="url(#glow)"/>`
+    : '';
+  const clipId = `card-${x}-${y}`;
+  const img = image
+    ? `<image href="data:image/png;base64,${image.toString('base64')}" x="${x + 12}" y="${y + 12}" width="${imageSize}" height="${imageSize}" preserveAspectRatio="xMidYMid slice" clip-path="url(#${clipId})"/>`
+    : `<rect x="${x + 12}" y="${y + 12}" width="${imageSize}" height="${imageSize}" rx="18" fill="#dbeafa"/>`;
+  const bonus = result.rarity === 3 ? 90 : result.rarity === 2 ? 10 : 5;
+  const fragments = result.rarity >= 2 ? 3 : 1;
 
   return `
-    <defs><clipPath id="${clipId}"><rect x="${innerX}" y="${innerY}" width="${innerW}" height="${innerH}" rx="18"/></clipPath></defs>
-    ${result.rarity === 3 ? `<rect x="${x-5}" y="${y-5}" width="${width+10}" height="${height+10}" rx="25" fill="none" stroke="#ffe36e" stroke-width="8" opacity=".8" ${glow}/>` : ''}
-    <rect x="${x}" y="${y}" width="${width}" height="${height}" rx="22" fill="#f9fbff" stroke="${border}" stroke-width="5"/>
-    ${image ? `<image href="${image}" x="${innerX}" y="${innerY}" width="${innerW}" height="${innerH}" preserveAspectRatio="xMidYMid slice" clip-path="url(#${clipId})"/>` : `<rect x="${innerX}" y="${innerY}" width="${innerW}" height="${innerH}" rx="18" fill="#dcecff"/>`}
-    <text x="${x + width/2}" y="${y + height - 36}" text-anchor="middle" font-size="28" font-weight="700" fill="#f5b900" stroke="#6b5200" stroke-width="1">${stars}</text>
-    <text x="${x + width/2}" y="${y + height - 8}" text-anchor="middle" font-size="18" font-weight="700" fill="#8b4b22">${escapeXml(result.name)}</text>
-    ${result.rateUp ? `<rect x="${x+6}" y="${y+6}" width="108" height="30" rx="8" fill="#ff4f6d"/><text x="${x+60}" y="${y+28}" text-anchor="middle" font-size="16" font-weight="800" fill="white">RATE UP</text>` : ''}
-    <rect x="${x+8}" y="${y+height+7}" width="70" height="28" rx="8" fill="#ffffff" stroke="#9b8c78" stroke-width="2"/>
-    <text x="${x+43}" y="${y+27+height}" text-anchor="middle" font-size="18" font-weight="700" fill="#7b4b26">♟ x${result.rarity === 3 ? '3' : result.rarity === 2 ? '3' : '1'}</text>
-    <rect x="${x+width-105}" y="${y+height+7}" width="105" height="28" rx="7" fill="#ff5266"/>
-    <text x="${x+width-52}" y="${y+height+20}" text-anchor="middle" font-size="13" font-weight="800" fill="white">${bonusText}</text>
-    <text x="${x+width-52}" y="${y+height+42}" text-anchor="middle" font-size="21" font-weight="800" fill="#8b4b22">${bonus}</text>
+    <defs><clipPath id="${clipId}"><rect x="${x + 12}" y="${y + 12}" width="${imageSize}" height="${imageSize}" rx="18"/></clipPath></defs>
+    ${glow}
+    <rect x="${x}" y="${y}" width="${width}" height="${cardHeight}" rx="22" fill="#f8fafc" stroke="${border}" stroke-width="4"/>
+    ${img}
+    ${starsSvg(result.rarity, x + width / 2, y + cardHeight + 22, 21)}
+    ${result.rateUp ? `<rect x="${x + 5}" y="${y + 5}" width="105" height="29" rx="7" fill="#ff5068"/><text x="${x + 57}" y="${y + 25}" text-anchor="middle" font-family="Arial,sans-serif" font-size="16" font-weight="800" fill="#fff">RATE UP</text>` : ''}
+    <text x="${x + 28}" y="${y + cardHeight + 51}" font-family="Arial,sans-serif" font-size="18" font-weight="800" fill="#70401f">♟ x${fragments}</text>
+    <rect x="${x + width - 92}" y="${y + cardHeight + 36}" width="92" height="22" rx="5" fill="#ff5365"/>
+    <text x="${x + width - 46}" y="${y + cardHeight + 52}" text-anchor="middle" font-family="Arial,sans-serif" font-size="12" font-weight="800" fill="#fff">Bonus</text>
+    <text x="${x + width - 46}" y="${y + cardHeight + 75}" text-anchor="middle" font-family="Arial,sans-serif" font-size="20" font-weight="800" fill="#70401f">x${bonus}</text>
   `;
 }
 
 async function renderResults(results, totalPulls) {
   const images = await Promise.all(results.map(result => fetchImageData(result.name)));
   const width = 1000;
-  const cardW = 250;
-  const cardH = 250;
-  const gap = 28;
-  const rows = results.length === 10 ? [3, 2, 3, 2] : results.length <= 3 ? [results.length] : [Math.min(3, results.length)];
-  let y = 205;
+  const cardW = 245;
+  const rowGap = 92;
+  const colGap = 32;
+  const rows = results.length === 10 ? [3, 2, 3, 2] : [results.length];
+  let y = 185;
   let index = 0;
-  let svgCards = '';
+  let cards = '';
 
   for (const count of rows) {
-    const rowWidth = count * cardW + (count - 1) * gap;
+    const rowWidth = count * cardW + (count - 1) * colGap;
     const startX = (width - rowWidth) / 2;
     for (let col = 0; col < count && index < results.length; col++) {
-      svgCards += cardSvg(results[index], images[index], startX + col * (cardW + gap), y, cardW, cardH);
+      cards += cardSvg(results[index], images[index], startX + col * (cardW + colGap), y, cardW);
       index++;
     }
-    y += 315;
+    y += 365 + rowGap;
   }
 
-  const height = y + 235;
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+  const height = y + 210;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
     <defs>
-      <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5ecbff"/><stop offset="1" stop-color="#d9f5ff"/></linearGradient>
-      <linearGradient id="grass" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#8ed54d"/><stop offset="1" stop-color="#4f9d37"/></linearGradient>
-      <filter id="glow"><feGaussianBlur stdDeviation="8" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+      <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#57c8fa"/><stop offset="1" stop-color="#d9f5ff"/></linearGradient>
+      <linearGradient id="grass" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#8ed44d"/><stop offset="1" stop-color="#4f9d37"/></linearGradient>
+      <filter id="glow"><feGaussianBlur stdDeviation="7" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
     </defs>
     <rect width="1000" height="${height}" fill="url(#sky)"/>
-    <circle cx="90" cy="85" r="55" fill="white" opacity=".75"/><circle cx="155" cy="70" r="75" fill="white" opacity=".65"/><circle cx="885" cy="90" r="65" fill="white" opacity=".75"/>
-    <path d="M0 ${height-420} Q500 ${height-520} 1000 ${height-390} L1000 ${height} L0 ${height}Z" fill="url(#grass)"/>
-    <path d="M0 ${height-395} L260 ${height-450} L300 ${height} L0 ${height}Z" fill="#7e9099" opacity=".7"/>
-    <path d="M0 135 L1000 135 L970 185 L30 185Z" fill="#ffffff" stroke="#7fd22d" stroke-width="8"/>
-    <text x="500" y="168" text-anchor="middle" font-family="Arial, sans-serif" font-size="38" font-weight="800" fill="#70401f">Scout Results</text>
-    ${svgCards}
-    <rect x="210" y="${height-190}" width="580" height="55" rx="8" fill="#ffffff" opacity=".94"/>
-    <text x="235" y="${height-154}" font-family="Arial, sans-serif" font-size="25" font-weight="700" fill="#70401f">Trainee Exchange Pts</text>
-    <text x="665" y="${height-154}" font-family="Arial, sans-serif" font-size="28" font-weight="800" fill="#70401f">${totalPulls}</text>
-    <text x="730" y="${height-154}" font-family="Arial, sans-serif" font-size="26" fill="#777">▶</text>
-    <text x="765" y="${height-154}" font-family="Arial, sans-serif" font-size="28" font-weight="800" fill="#e08a36">${totalPulls + 10}</text>
-    <text x="500" y="${height-105}" text-anchor="middle" font-family="Arial, sans-serif" font-size="21" font-weight="700" fill="#70401f">Trainees you've already scouted grant Goddess Statues instead.</text>
+    <circle cx="100" cy="70" r="55" fill="#fff" opacity=".7"/><circle cx="165" cy="55" r="75" fill="#fff" opacity=".6"/><circle cx="880" cy="70" r="70" fill="#fff" opacity=".65"/>
+    <path d="M0 ${height - 520} Q500 ${height - 600} 1000 ${height - 500} L1000 ${height} L0 ${height}Z" fill="url(#grass)"/>
+    <path d="M0 ${height - 490} L235 ${height - 540} L285 ${height} L0 ${height}Z" fill="#71848d" opacity=".72"/>
+    <path d="M0 105 L1000 105 L970 155 L30 155Z" fill="#fff" stroke="#7bd32c" stroke-width="8"/>
+    <text x="500" y="139" text-anchor="middle" font-family="Arial,sans-serif" font-size="36" font-weight="800" fill="#70401f">Scout Results</text>
+    ${cards}
+    <rect x="205" y="${height - 175}" width="590" height="52" rx="8" fill="#fff" opacity=".95"/>
+    <text x="230" y="${height - 141}" font-family="Arial,sans-serif" font-size="24" font-weight="700" fill="#70401f">Trainee Exchange Pts</text>
+    <text x="665" y="${height - 141}" font-family="Arial,sans-serif" font-size="27" font-weight="800" fill="#70401f">${totalPulls}</text>
+    <text x="725" y="${height - 141}" font-family="Arial,sans-serif" font-size="25" fill="#777">▶</text>
+    <text x="760" y="${height - 141}" font-family="Arial,sans-serif" font-size="27" font-weight="800" fill="#e08a36">${totalPulls + 10}</text>
+    <text x="500" y="${height - 94}" text-anchor="middle" font-family="Arial,sans-serif" font-size="20" font-weight="700" fill="#70401f">Trainees you've already scouted grant Goddess Statues instead.</text>
   </svg>`;
 
   return sharp(Buffer.from(svg)).png().toBuffer();
@@ -199,7 +224,7 @@ async function sendResults(interaction, results, totalPulls) {
   const attachment = new AttachmentBuilder(png, { name: 'gacha-results.png' });
   const panel = buildPanel(interaction.user.id, `**${results.length === 10 ? '10-PULL RESULTS' : 'PULL RESULT'}**\n${results.map(resultLine).join('\n')}\n\n🎯 Total simulated pulls: **${totalPulls}**`);
   panel.embeds[0].setImage('attachment://gacha-results.png');
-  return { content: panel.embeds[0].data.description, embeds: [panel.embeds[0]], files: [attachment], components: panel.components };
+  return { embeds: [panel.embeds[0]], files: [attachment], components: panel.components };
 }
 
 function handleCommand(interaction) {
@@ -212,15 +237,15 @@ async function handleButton(interaction) {
   const s = getSession(interaction.user.id);
 
   if (interaction.customId === 'gacha_reset') {
-    s.pulls = 0; s.last = [];
+    s.pulls = 0;
+    s.last = [];
     return interaction.update(buildPanel(interaction.user.id, '♻️ Simulator reset.'));
   }
 
   if (interaction.customId === 'gacha_last') {
     if (!s.last.length) return interaction.reply({ content: 'No pulls yet. Hit **1 Pull** or **10 Pulls** first.', ephemeral: true });
     await interaction.deferReply({ ephemeral: true });
-    const payload = await sendResults(interaction, s.last, s.pulls);
-    return interaction.editReply(payload);
+    return interaction.editReply(await sendResults(interaction, s.last, s.pulls));
   }
 
   const count = interaction.customId === 'gacha_10' ? 10 : 1;
@@ -229,8 +254,7 @@ async function handleButton(interaction) {
   s.last = results;
 
   await interaction.deferUpdate();
-  const payload = await sendResults(interaction, results, s.pulls);
-  return interaction.editReply(payload);
+  return interaction.editReply(await sendResults(interaction, results, s.pulls));
 }
 
 module.exports = { handleCommand, handleButton };
