@@ -1,6 +1,7 @@
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 
 const sessions = new Map();
+const imageCache = new Map();
 const BANNER = {
   name: 'Trainee Gacha',
   rateUp: ['Tamamo Cross', 'Inari One']
@@ -43,6 +44,50 @@ function resultLine(result) {
   return `${rarityStars(result.rarity)} **${result.name}**${rate}`;
 }
 
+function slugify(name) {
+  return name
+    .replace(/\s*\([^)]*\)/g, '')
+    .replace(/\./g, '')
+    .replace(/[^a-zA-Z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .toLowerCase();
+}
+
+async function fetchImageUrl(name) {
+  const baseName = name.replace(/\s*\([^)]*\)/g, '').trim();
+  if (imageCache.has(baseName)) return imageCache.get(baseName);
+
+  const promise = (async () => {
+    try {
+      const slug = slugify(baseName);
+      const response = await fetch(`https://gametora.com/umamusume/characters/${slug}`, {
+        signal: AbortSignal.timeout(2500)
+      });
+      if (!response.ok) return null;
+      const html = await response.text();
+      const match = html.match(/https?:\/\/media\.gametora\.com\/umamusume\/characters\/profile\/\d+\.png/);
+      return match ? match[0] : null;
+    } catch (_) {
+      return null;
+    }
+  })();
+
+  imageCache.set(baseName, promise);
+  return promise;
+}
+
+async function buildResultEmbeds(results) {
+  const urls = await Promise.all(results.map(result => fetchImageUrl(result.name)));
+  return results.map((result, index) => {
+    const rate = result.rateUp ? ' ✨ RATE UP' : '';
+    const embed = new EmbedBuilder()
+      .setTitle(`${rarityStars(result.rarity)} ${result.name}${rate}`)
+      .setDescription(result.rarity === 3 ? '★★★ SSR / 3★' : result.rarity === 2 ? '★★☆ SR / 2★' : '★☆☆ R / 1★');
+    if (urls[index]) embed.setThumbnail(urls[index]);
+    return embed;
+  });
+}
+
 function getSession(userId) {
   if (!sessions.has(userId)) sessions.set(userId, { pulls: 0, last: [] });
   return sessions.get(userId);
@@ -68,24 +113,31 @@ function handleCommand(interaction) {
   return interaction.reply(buildPanel(interaction.user.id));
 }
 
-function handleButton(interaction) {
+async function handleButton(interaction) {
   if (!interaction.isButton() || !interaction.customId.startsWith('gacha_')) return false;
   const s = getSession(interaction.user.id);
+
   if (interaction.customId === 'gacha_reset') {
     s.pulls = 0; s.last = [];
     return interaction.update(buildPanel(interaction.user.id, '♻️ Simulator reset.'));
   }
+
   if (interaction.customId === 'gacha_last') {
     if (!s.last.length) return interaction.reply({ content: 'No pulls yet. Hit **1 Pull** or **10 Pulls** first.', ephemeral: true });
-    return interaction.reply({ content: s.last.map(resultLine).join('\n'), ephemeral: true });
+    await interaction.deferReply({ ephemeral: true });
+    const embeds = await buildResultEmbeds(s.last);
+    return interaction.editReply({ embeds });
   }
+
   const count = interaction.customId === 'gacha_10' ? 10 : 1;
   const results = pull(count);
   s.pulls += count;
   s.last = results;
-  const text = results.map(resultLine).join('\n');
-  const notice = `**${count === 10 ? '10-PULL RESULTS' : 'PULL RESULT'}**\n\n${text}\n\n🎯 Total simulated pulls: **${s.pulls}**`;
-  return interaction.update(buildPanel(interaction.user.id, notice));
+
+  await interaction.deferUpdate();
+  const resultEmbeds = await buildResultEmbeds(results);
+  const panel = buildPanel(interaction.user.id, `**${count === 10 ? '10-PULL RESULTS' : 'PULL RESULT'}**\n\n${results.map(resultLine).join('\n')}\n\n🎯 Total simulated pulls: **${s.pulls}**`);
+  return interaction.editReply({ embeds: [...resultEmbeds, panel.embeds[0]], components: panel.components });
 }
 
 module.exports = { handleCommand, handleButton };
