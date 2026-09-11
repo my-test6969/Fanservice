@@ -76,7 +76,7 @@ async function fetchImageUrl(name) {
   return promise;
 }
 
-async function buildResultEmbeds(results) {
+async function buildResultEmbeds(results, totalPulls) {
   const urls = await Promise.all(results.map(result => fetchImageUrl(result.name)));
   return results.map((result, index) => {
     const rate = result.rateUp ? ' ✨ RATE UP' : '';
@@ -84,6 +84,7 @@ async function buildResultEmbeds(results) {
       .setTitle(`${rarityStars(result.rarity)} ${result.name}${rate}`)
       .setDescription(result.rarity === 3 ? '★★★ SSR / 3★' : result.rarity === 2 ? '★★☆ SR / 2★' : '★☆☆ R / 1★');
     if (urls[index]) embed.setThumbnail(urls[index]);
+    if (index === 0) embed.setFooter({ text: `Banner: ${BANNER.name} • Rate Up: ${BANNER.rateUp.join(' / ')} • Total pulls: ${totalPulls}` });
     return embed;
   });
 }
@@ -125,7 +126,7 @@ async function handleButton(interaction) {
   if (interaction.customId === 'gacha_last') {
     if (!s.last.length) return interaction.reply({ content: 'No pulls yet. Hit **1 Pull** or **10 Pulls** first.', ephemeral: true });
     await interaction.deferReply({ ephemeral: true });
-    const embeds = await buildResultEmbeds(s.last);
+    const embeds = await buildResultEmbeds(s.last, s.pulls);
     return interaction.editReply({ embeds });
   }
 
@@ -135,9 +136,10 @@ async function handleButton(interaction) {
   s.last = results;
 
   await interaction.deferUpdate();
-  const resultEmbeds = await buildResultEmbeds(results);
-  const panel = buildPanel(interaction.user.id, `**${count === 10 ? '10-PULL RESULTS' : 'PULL RESULT'}**\n\n${results.map(resultLine).join('\n')}\n\n🎯 Total simulated pulls: **${s.pulls}**`);
-  return interaction.editReply({ embeds: [...resultEmbeds, panel.embeds[0]], components: panel.components });
+  const resultEmbeds = await buildResultEmbeds(results, s.pulls);
+  const row = buildPanel(interaction.user.id).components;
+  const summary = `**${count === 10 ? '10-PULL RESULTS' : 'PULL RESULT'}**\n${results.map(resultLine).join('\n')}\n\n🎯 Total simulated pulls: **${s.pulls}**`;
+  return interaction.editReply({ content: summary, embeds: resultEmbeds, components: row });
 }
 
 module.exports = { handleCommand, handleButton };
