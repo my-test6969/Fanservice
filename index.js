@@ -25,6 +25,7 @@ const {
 
 const { getUmaMoeProfile } = require('./src/umaMoe');
 const { getPureDbProfile, getPureDbSearch, SEARCH_URL } = require('./src/pureDb');
+const { handleCommand: handleGachaCommand, handleButton: handleGachaButton } = require('./src/gacha');
 
 process.on('unhandledRejection', error => console.error('Unhandled promise rejection:', error));
 process.on('uncaughtException', error => console.error('Uncaught exception:', error));
@@ -51,7 +52,10 @@ const commands = [
     .addStringOption(option => option.setName('red').setDescription('Red/pink spark, e.g. Turf 3'))
     .addStringOption(option => option.setName('green').setDescription('Green spark / unique'))
     .addIntegerOption(option => option.setName('white_min').setDescription('Minimum total white sparks').setMinValue(1).setMaxValue(18))
-    .addBooleanOption(option => option.setName('mlb_support').setDescription('Prefer an MLB support card'))
+    .addBooleanOption(option => option.setName('mlb_support').setDescription('Prefer an MLB support card')),
+  new SlashCommandBuilder()
+    .setName('uma-gacha')
+    .setDescription('Open the Uma Musume trainee gacha simulator.')
 ].map(command => command.toJSON());
 
 function validTrainerId(value) {
@@ -145,6 +149,15 @@ client.on('interactionCreate', async interaction => {
   console.log(`Interaction received: ${interaction.type} ${interaction.commandName || interaction.customId || 'unknown'}`);
 
   if (interaction.isButton()) {
+    if (interaction.customId.startsWith('gacha_')) {
+      try {
+        return await handleGachaButton(interaction);
+      } catch (error) {
+        console.error('Gacha button error:', error);
+        if (!interaction.replied && !interaction.deferred) return interaction.reply({ content: '⚠️ Gacha error. Please try again.', ephemeral: true });
+        return;
+      }
+    }
     if (!['fanservice_prev', 'fanservice_next'].includes(interaction.customId)) return;
     cleanupSearchPages();
     const state = searchPages.get(interaction.message.id);
@@ -158,6 +171,16 @@ client.on('interactionCreate', async interaction => {
   }
 
   if (!interaction.isChatInputCommand()) return;
+
+  if (interaction.commandName === 'uma-gacha') {
+    try {
+      return await handleGachaCommand(interaction);
+    } catch (error) {
+      console.error('Gacha command error:', error);
+      if (!interaction.replied && !interaction.deferred) return interaction.reply({ content: '⚠️ Gacha could not be opened.', ephemeral: true });
+      return;
+    }
+  }
 
   if (interaction.commandName === 'ping') {
     return interaction.reply({ content: '🏓 Pong! Fanservice is online.' });
@@ -175,8 +198,6 @@ client.on('interactionCreate', async interaction => {
     }
 
     try {
-      // Primary source: uma.moe's V3 unified search API. It supports direct
-      // trainer_id filtering and is much faster/reliable than automating Pure DB.
       let profile = null;
       try {
         console.log(`Trying uma.moe Trainer ID lookup: ${trainerId}`);
@@ -185,8 +206,6 @@ client.on('interactionCreate', async interaction => {
         console.warn(`uma.moe lookup failed for ${trainerId}: ${error.message}`);
       }
 
-      // Secondary source: Pure DB, kept as a fallback for accounts that are
-      // present there but not in uma.moe.
       if (!profile) {
         console.log(`Trying Pure DB fallback for Trainer ID: ${trainerId}`);
         profile = await getPureDbProfile(trainerId);
